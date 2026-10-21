@@ -1,0 +1,21 @@
+{
+  "name": "@laplace.live/kakashi-server",
+  "private": true,
+  "version": "0.0.0",
+  "description": "LAPLACE Kakashi Server, the Copy Ninja relay for LAPLACE Chatterbox",
+  "license": "AGPL-3.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch run src/index.ts --debug",
+    "build": "bun run scripts/build.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@laplace.live/kakashi-protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}

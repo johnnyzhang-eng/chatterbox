@@ -1,68 +1,78 @@
-name: Build and Deploy
+name: Release
 
 on:
   push:
-    branches: [master]
+    branches:
+      - master
   workflow_dispatch:
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: false
 
 jobs:
-  build-and-deploy:
+  release:
+    name: Release
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      published-packages: ${{ steps.changesets.outputs.published-packages }}
+
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: oven-sh/setup-bun@v2
-
-      - run: bun install --frozen-lockfile
-
-      - run: bun run lint
-
-      - run: bun test
-
-      - run: bun run build
-
-      - uses: actions/configure-pages@v6
-
-      - uses: actions/upload-pages-artifact@v5
+      - name: Checkout Repo
+        uses: actions/checkout@v7
         with:
-          path: dist
+          # This makes Actions fetch all Git history so that Changesets can generate changelogs
+          fetch-depth: 0
 
-      - id: deployment
-        uses: actions/deploy-pages@v5
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
 
-      - name: Mirror to Cloudflare R2
-        env:
-          # R2 bucket-scoped tokens are rejected by the REST route wrangler
-          # uses, but work on the S3-compatible API, so upload via aws CLI.
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          # R2 doesn't support the CRC32 streaming checksums newer aws CLIs
-          # send by default.
-          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          R2_BUCKET: downloads
-        run: |
-          # Short cache on meta.js so update checks see new versions quickly;
-          # user.js is only fetched after a version bump so it can cache longer.
-          aws s3 cp dist/laplace-chatterbox.user.js "s3://$R2_BUCKET/chatterbox/laplace-chatterbox.user.js" \
-            --endpoint-url "$R2_ENDPOINT" \
-            --content-type "text/javascript; charset=utf-8" \
-            --cache-control "public, max-age=120"
-          aws s3 cp dist/laplace-chatterbox.meta.js "s3://$R2_BUCKET/chatterbox/laplace-chatterbox.meta.js" \
-            --endpoint-url "$R2_ENDPOINT" \
-            --content-type "text/javascript; charset=utf-8" \
-            --cache-control "public, max-age=60"
+      - name: Install Dependencies
+        run: bun install --frozen-lockfile
+
+      # Release writes (the Version Packages PR, tags and GitHub Releases) use
+      # a GitHub App token instead of `GITHUB_TOKEN`. Events caused by
+      # `GITHUB_TOKEN` don't trigger other workflows, so the server's Releases
+      # would never start build-server.yml, and checks on the Version Packages
+      # PR would wait for manual approval.
+      #
+      # Requires the laplace-release-bot GitHub App installed on this repo with
+      # Contents and Pull requests read & write, its Client ID and private key
+      # stored in the `RELEASE_APP_CLIENT_ID` and `RELEASE_APP_PRIVATE_KEY` org
+      # secrets.
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Create Release Pull Request or Tag Releases
+        id: changesets
+        uses: changesets/action@v2
+        with:
+          # Every package is private: `changeset publish` only tags the new
+          # versions (`privatePackages.tag`), and the action pushes the tags
+          # and creates a GitHub Release per tag from its CHANGELOG entry.
+          publish-script: bun run release
+          version-script: bun run version
+          # The @laplace.live/kakashi-server Release fires build-server.yml's
+          # `release: created` trigger, which builds, signs and uploads the
+          # binaries. v2 reads the token only from this input, not from the
+          # `GITHUB_TOKEN` env var.
+          github-token: ${{ steps.app-token.outputs.token }}
+
+  # Runs on this master push rather than on the tag, which the github-pages
+  # environment's branch protection would reject.
+  deploy-userscript:
+    needs: release
+    if: contains(fromJSON(needs.release.outputs.published-packages).*.name, 'laplace-chatterbox')
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/deploy-userscript.yml
+    secrets: inherit
