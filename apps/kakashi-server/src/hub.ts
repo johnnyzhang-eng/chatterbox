@@ -207,7 +207,11 @@ export class Hub {
   }
 
   private sendFollows(masterRoomId: number | null): void {
-    if (masterRoomId === null) return
+    if (masterRoomId === null) {
+      // Mirrors drop pending moves while the master's room is unknown (e.g. it reloads), so re-send once it's back.
+      this.lastFollow.clear()
+      return
+    }
     for (const [uid, peers] of this.groups()) {
       if (this.memberRole(uid, peers) !== 'mirror') continue
       if (peers.some(p => p.roomId === masterRoomId)) {

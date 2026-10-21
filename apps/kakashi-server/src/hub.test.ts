@@ -221,4 +221,17 @@ describe('room following', () => {
     hub.update('x', { role: 'mirror', roomId: OTHER_ROOM, visible: true, follow: true })
     expect(received('x', 'follow')).toHaveLength(2)
   })
+
+  test('re-sends the follow when the master comes back after a reload', () => {
+    const { hub, join, received } = createHub()
+    join('m', '1', 'master', ROOM)
+    join('x', '2', 'mirror', OTHER_ROOM)
+    hub.leave('m')
+    expect(hub.roster().masterRoomId).toBeNull()
+    join('m-reloaded', '1', 'master', ROOM)
+    expect(received('x', 'follow')).toEqual([
+      { type: 'follow', roomId: ROOM },
+      { type: 'follow', roomId: ROOM },
+    ])
+  })
 })
