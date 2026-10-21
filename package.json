@@ -13,9 +13,12 @@
     "build:server": "bun run --cwd apps/kakashi-server build",
     "lint": "biome check",
     "typecheck": "bun run --workspaces typecheck",
-    "test": "bun test"
+    "test": "bun test",
+    "version": "changeset version",
+    "release": "changeset publish"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.15"
+    "@biomejs/biome": "^2.5.15",
+    "@changesets/cli": "^3.0.3"
   }
 }

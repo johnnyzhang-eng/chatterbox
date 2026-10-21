@@ -28,6 +28,14 @@ bun run lint && bun run typecheck && bun test
 bun run build        # userscript → apps/chatterbox/dist
 ```
 
+## Releasing
+
+Releases use [changesets](https://github.com/changesets/changesets). Run `bunx changeset` to describe a change. On merge to master, the Release workflow keeps a Version Packages PR open. Merging that PR:
+
+- tags each bumped package and creates its GitHub Release;
+- deploys the userscript when `laplace-chatterbox` was bumped;
+- builds, signs and attaches the server binaries when `@laplace.live/kakashi-server` was bumped.
+
 ## Credits
 
 - The auto-seek (自动追帧) algorithm — buffer thresholds, speed ladder,

@@ -1,0 +1,182 @@
+name: Build Server Binaries
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - apps/kakashi-server/**
+      - packages/kakashi-protocol/**
+      - package.json
+      - bun.lock
+      - .github/workflows/build-server.yml
+  pull_request:
+    branches: [master]
+    paths:
+      - apps/kakashi-server/**
+      - packages/kakashi-protocol/**
+      - package.json
+      - bun.lock
+      - .github/workflows/build-server.yml
+  release:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-unix:
+    # Changesets creates a Release for every versioned package; only the
+    # server's Releases get binaries.
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, '@laplace.live/kakashi-server@')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: linux-binaries
+            targets: --target bun-linux-x64 --target bun-linux-arm64
+          - os: macos-latest
+            artifact_name: darwin-binaries
+            targets: --target bun-darwin-arm64 --target bun-darwin-x64
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+
+      - name: Build binaries
+        run: bun run --cwd apps/kakashi-server build ${{ matrix.targets }}
+
+      - name: Import Apple Certificate
+        if: matrix.os == 'macos-latest' && github.event_name == 'release'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create a temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          # Create the keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Import certificate
+          echo "$APPLE_CERTIFICATE" | base64 --decode -o $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+
+          # Add keychain to search list
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Sign with the identity the certificate carries, so the team follows APPLE_CERTIFICATE alone
+          APPLE_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | sed -n 's/.*"\(Developer ID Application: .*\)"$/\1/p' | head -n 1)
+          if [ -z "$APPLE_IDENTITY" ]; then
+            echo "::error::APPLE_CERTIFICATE holds no valid Developer ID Application identity"
+            exit 1
+          fi
+          # Masked in logs, as it was when it came from a secret
+          echo "::add-mask::$APPLE_IDENTITY"
+          echo "APPLE_IDENTITY=$APPLE_IDENTITY" >> "$GITHUB_ENV"
+
+          # Clean up
+          rm $RUNNER_TEMP/certificate.p12
+
+      - name: Prepare Apple API Key
+        if: matrix.os == 'macos-latest' && github.event_name == 'release'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          mkdir -p ~/private_keys
+          echo "$APPLE_API_KEY" > ~/private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
+
+      - name: Sign and notarize macOS binaries
+        if: matrix.os == 'macos-latest' && github.event_name == 'release'
+        working-directory: apps/kakashi-server
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          KEY_PATH=~/private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
+          for bin in dist/kakashi-server-darwin-*; do
+            # Notarization requires the hardened runtime; the entitlements let JavaScriptCore JIT under it.
+            codesign --force --timestamp --options runtime --entitlements entitlements.plist --sign "$APPLE_IDENTITY" "$bin"
+            codesign --verify --strict --verbose=2 "$bin"
+
+            # notarytool only takes archives, and a bare Mach-O can't be stapled: Gatekeeper fetches the ticket online.
+            zip="$RUNNER_TEMP/$(basename "$bin").zip"
+            ditto -c -k --keepParent "$bin" "$zip"
+            result=$(xcrun notarytool submit "$zip" --key "$KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER" --wait --output-format json)
+            echo "$result"
+            if [ "$(echo "$result" | jq -r .status)" != "Accepted" ]; then
+              xcrun notarytool log "$(echo "$result" | jq -r .id)" --key "$KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
+              exit 1
+            fi
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: apps/kakashi-server/dist/kakashi-server-*
+
+      - name: Upload to GitHub release
+        if: github.event_name == 'release'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: apps/kakashi-server/dist/kakashi-server-*
+          file_glob: true
+          tag: ${{ github.ref }}
+          overwrite: true
+
+  build-windows:
+    # Same filter as build-unix.
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, '@laplace.live/kakashi-server@')
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install --frozen-lockfile
+
+      # Built on Windows itself: Bun can't embed the icon and version info when cross-compiling.
+      - name: Build Windows binary
+        run: bun run --cwd apps/kakashi-server build --target bun-windows-x64
+
+      - name: Sign Windows binary with Trusted Signing
+        if: github.event_name == 'release'
+        uses: azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: https://eus.codesigning.azure.net/
+          trusted-signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERTIFICATE_PROFILE_NAME }}
+          files-folder: apps/kakashi-server/dist
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-binaries
+          path: apps/kakashi-server/dist/kakashi-server-windows-x64.exe
+
+      - name: Upload to GitHub release
+        if: github.event_name == 'release'
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: apps/kakashi-server/dist/kakashi-server-windows-x64.exe
+          tag: ${{ github.ref }}
+          overwrite: true
