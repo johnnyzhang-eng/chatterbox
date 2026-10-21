@@ -6,7 +6,7 @@ The local relay behind Copy Ninja (拷贝忍者) in [LAPLACE Chatterbox](https:/
 
 - Every live-room tab running Chatterbox connects over WebSocket and reports its account, room and role.
 - When the master's send succeeds, the server delivers it to exactly one tab per mirror account in that room. The master's own tabs never receive it back.
-- Each mirror decides locally what to do with it: which actions to follow (常规发送, 独轮车, …), how much to decay (randomly skip a share and add a random delay), and whether to follow the master into other rooms.
+- Each mirror decides locally what to do with it: which actions to follow (常规发送, 独轮车, …), how much to decay (randomly skip a share and add a random delay), whether to reword it through its own LLM (感知忍術) instead of copying it verbatim, and whether to follow the master into other rooms.
 - Mirrors report each result back to the master's panel.
 - Only one master account is active at a time. A second account set to 主控 waits on standby. The master's seat is held for 15 s while it reloads, so a page reload doesn't hand control to the standby.
 - Cookies and CSRF tokens never leave the browser. The server only relays the final message text and room id.
@@ -41,7 +41,7 @@ Then, in each browser, open a Bilibili live room → Chatterbox → **忍者** t
 
 1. Tick **启用拷贝忍者**. The default address `ws://127.0.0.1:9697` matches the server defaults.
 2. Set one account to **主控** and leave the others as **分身**.
-3. On each 分身, pick the actions to follow, the decay %, and the delay range.
+3. On each 分身, pick the actions to follow, the decay %, and the delay range. Tick **感知忍術** to have that mirror reword each copy with its LLM prompt (设置 → LLM 提示词 → 感知忍術).
 
 `GET http://127.0.0.1:9697/` returns `{ name, version, protocol }`, which is handy to check the server is up.
 
@@ -52,7 +52,7 @@ Then, in each browser, open a Bilibili live room → Chatterbox → **忍者** t
 - **Origins are checked.** The server only accepts handshakes from `https://live.bilibili.com`, so other websites, sandboxed pages and unrelated extensions can't connect and drive your accounts. If your userscript manager connects from its own extension origin instead, the server logs the rejected origin. Allow that exact origin with `--allow-origin`.
 - **Keep mirror tabs alive.** Background tabs get throttled and Chrome's Memory Saver may discard them. Exempt live.bilibili.com if mirrors drop out.
 - **Mirrors pause themselves** after 3 consecutive failed copies (mute, risk control). Resume from the 忍者 tab.
-- **Decay is not anonymity.** It makes copies less alike in content and timing. Bilibili can still link accounts by IP and device, so mirror accounts can get muted or banned.
+- **Decay and 感知忍術 are not anonymity.** They make copies less alike in content and timing. Bilibili can still link accounts by IP and device, so mirror accounts can get muted or banned.
 
 ## Development
 

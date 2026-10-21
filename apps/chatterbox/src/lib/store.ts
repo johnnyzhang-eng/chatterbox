@@ -15,7 +15,7 @@ import {
 } from './const'
 import { gmSignal, migrateGmKey } from './gm-signal'
 import { appendLog } from './log'
-import { DEFAULT_AI_CHAT_PROMPTS, DEFAULT_GLOBAL_PROMPT } from './prompts'
+import { DEFAULT_AI_CHAT_PROMPTS, DEFAULT_GLOBAL_PROMPT, DEFAULT_KANCHI_PROMPT } from './prompts'
 import { resolveInvisibleChar } from './utils'
 
 // GM-persisted settings
@@ -231,6 +231,9 @@ export const llmActivePromptAutoSend = gmSignal('llmActivePromptAutoSend', 0)
 })()
 export const llmPromptsAiChat = gmSignal<string[]>('llmPromptsAiChat', [...DEFAULT_AI_CHAT_PROMPTS])
 export const llmActivePromptAiChat = gmSignal('llmActivePromptAiChat', 0)
+// 感知忍術: Copy Ninja mirrors rewrite master actions with these instead of copying verbatim.
+export const llmPromptsKanchi = gmSignal<string[]>('llmPromptsKanchi', [DEFAULT_KANCHI_PROMPT])
+export const llmActivePromptKanchi = gmSignal('llmActivePromptKanchi', 0)
 
 // AI Chat ("AI 融入") settings; defaults mirror laplace-cap's `useAiChatter`.
 // - `aiChatAutoSend`: Review mode by default; on = bypass candidate list, enqueue straight away.

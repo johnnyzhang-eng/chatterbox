@@ -243,7 +243,8 @@ export async function chatCompletion(opts: ChatCompletionOptions): Promise<strin
   if (!Array.isArray(choices) || choices.length === 0) {
     throw new Error('返回数据缺少 choices 数组')
   }
+  // An empty reply comes back as '' so callers can treat it as a refusal rather than an error.
   const content = readStringField(readPath(choices[0], 'message'), 'content')
-  if (!content) throw new Error('返回数据缺少 content 字段')
+  if (content === undefined) throw new Error('返回数据缺少 content 字段')
   return content
 }

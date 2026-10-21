@@ -29,6 +29,7 @@ const FEATURE_LABELS: Record<LlmPromptFeature, string> = {
   autoBlend: '自动融入',
   autoSend: '独轮车',
   aiChat: 'AI 融入',
+  kanchi: '感知忍術',
 }
 
 /** Whether the active provider's API config (base + key + model) is filled in; does NOT check any prompt. */

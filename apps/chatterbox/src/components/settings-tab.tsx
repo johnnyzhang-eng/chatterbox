@@ -37,12 +37,14 @@ import {
   llmActivePromptAutoBlend,
   llmActivePromptAutoSend,
   llmActivePromptGlobal,
+  llmActivePromptKanchi,
   llmActivePromptNormalSend,
   llmActiveProviderId,
   llmPromptsAiChat,
   llmPromptsAutoBlend,
   llmPromptsAutoSend,
   llmPromptsGlobal,
+  llmPromptsKanchi,
   llmPromptsNormalSend,
   llmProviders,
   localGlobalRules,
@@ -1526,7 +1528,7 @@ export function SettingsTab() {
               />
             </div>
 
-            <div>
+            <div class='mb-3'>
               <Label htmlFor='llmPromptAiChat' className='mb-1 block font-bold'>
                 AI 融入
               </Label>
@@ -1544,6 +1546,27 @@ export function SettingsTab() {
                   llmActivePromptAiChat.value = v
                 }}
                 placeholder='例如：你是一位幽默的成年观众，喜欢用简短中文吐槽…'
+              />
+            </div>
+
+            <div>
+              <Label htmlFor='llmPromptKanchi' className='mb-1 block font-bold'>
+                感知忍術
+              </Label>
+              <div class='mb-1 text-ga6'>
+                用于「忍者 → 感知忍術」：分身跟随前用 LLM 改写主控发出的弹幕，不再照抄原文（表情不改写）
+              </div>
+              <PromptManager
+                selectId='llmPromptKanchi'
+                prompts={llmPromptsKanchi.value}
+                activeIndex={llmActivePromptKanchi.value}
+                onPromptsChange={v => {
+                  llmPromptsKanchi.value = v
+                }}
+                onActiveIndexChange={v => {
+                  llmActivePromptKanchi.value = v
+                }}
+                placeholder='例如：用自己的话换个说法表达同样的意思，不要照抄原文'
               />
             </div>
           </div>
