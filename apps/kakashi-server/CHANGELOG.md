@@ -1,5 +1,11 @@
 # @laplace.live/kakashi-server
 
+## 0.1.1
+
+### Patch Changes
+
+- de35b9d: fix: publish the release with its signed binaries attached; 0.1.0 shipped without them because releases are immutable once published
+
 ## 0.1.0
 
 ### Minor Changes
