@@ -1,5 +1,11 @@
 # laplace-chatterbox
 
+## 4.4.1
+
+### Patch Changes
+
+- 07fd0c4: chore: update @soniox/client to 2.4.0 (and its CDN build), cn to 0.5.0 and @types/bun to 1.4.3
+
 ## 4.4.0
 
 ### Minor Changes
