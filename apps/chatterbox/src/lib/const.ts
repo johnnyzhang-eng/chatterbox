@@ -67,6 +67,9 @@ export const BASE_URL = {
   /** Fetches room basic info. GET, param: id (room ID). */
   BILIBILI_ROOM_INIT: 'https://api.live.bilibili.com/room/v1/Room/room_init',
 
+  /** Logged-in user info (`data.uname`, `data.mid`). GET with credentials. */
+  BILIBILI_NAV: 'https://api.bilibili.com/x/web-interface/nav',
+
   /** Send chat. POST, params: web_location, w_rid, wts. */
   BILIBILI_MSG_SEND: 'https://api.live.bilibili.com/msg/send',
 

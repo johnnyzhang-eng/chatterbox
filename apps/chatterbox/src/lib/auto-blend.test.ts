@@ -51,7 +51,7 @@ async function createHarness() {
     return { send: true, reason: '符合当前判断规则' }
   })
   const polish = mock(async (_slot: string, text: string, _options?: { signal?: AbortSignal }) => `${text}！`)
-  const enqueue = mock(async (_text: string, _room: string, _csrf: string, _priority: number) => ({
+  const enqueue = mock(async (_text: string, _room: string, _csrf: string, _priority: number, _source: string) => ({
     isEmoticon: false,
     code: 0,
   }))
@@ -70,6 +70,7 @@ async function createHarness() {
       getDedeUid: () => 'self',
       setRandomDanmakuColor: async () => {},
     },
+    './copy-ninja/settings': { isCopyNinjaMember: (uid: string) => uid === 'mirror' },
     './danmaku-stream': {
       subscribeDanmaku: (subscription: HarnessSubscription) => {
         subscriber = subscription
@@ -176,6 +177,16 @@ describe('automatic blend decision gate', () => {
     await flush()
     expect(h.decide).toHaveBeenCalledTimes(1)
     expect(h.enqueue).toHaveBeenCalledTimes(1)
+  })
+
+  test('ignores Copy Ninja group copies when counting distinct users', async () => {
+    const h = await createHarness()
+    h.message('好耶', 'viewer-1')
+    h.message('好耶', 'mirror')
+    h.message('好耶', 'mirror')
+    await flush()
+    expect(h.decide).not.toHaveBeenCalled()
+    expect(h.enqueue).not.toHaveBeenCalled()
   })
 
   test('makes one decision for a qualified burst and sends only after approval', async () => {

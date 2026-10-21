@@ -1,10 +1,12 @@
 import { cn } from 'cn'
 
+import { copyNinjaStatus } from '../lib/copy-ninja/settings'
 import { activeTab, aiChatEnabled, autoBlendEnabled, sendMsg, sttRunning } from '../lib/store'
 
 const TABS = [
   { id: 'fasong', label: '发送' },
   { id: 'tongchuan', label: '同传' },
+  { id: 'ninja', label: '忍者' },
   { id: 'settings', label: '设置' },
   { id: 'about', label: '关于' },
 ] as const
@@ -35,6 +37,7 @@ export function Tabs() {
             {tab.id === 'fasong' && autoBlendEnabled.value ? ' 🟣' : ''}
             {tab.id === 'fasong' && aiChatEnabled.value ? ' 🟡' : ''}
             {tab.id === 'tongchuan' && sttRunning.value ? ' 🔵' : ''}
+            {tab.id === 'ninja' && copyNinjaStatus.value === 'connected' ? ' 🥷' : ''}
           </button>
         )
       })}

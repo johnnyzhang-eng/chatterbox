@@ -8,6 +8,7 @@
 import { effect, signal } from '@preact/signals'
 
 import { ensureRoomId, getCsrfToken } from './api'
+import { isCopyNinjaMember } from './copy-ninja/settings'
 import { type DanmakuEvent, subscribeDanmaku } from './danmaku-stream'
 import { type ChatCompletionResponseFormat, chatCompletion } from './llm'
 import { isLlmReady } from './llm-tasks'
@@ -322,7 +323,7 @@ async function sendAiChatDanmaku(message: string): Promise<boolean> {
     }
     // Record BEFORE the send so the echo can find the entry when it broadcasts back.
     markOutgoing(message)
-    const result = await enqueueDanmaku(message, roomId, csrfToken, SendPriority.AUTO)
+    const result = await enqueueDanmaku(message, roomId, csrfToken, SendPriority.AUTO, 'ai')
     appendLog(result, 'AI 融入', message)
     return result.success
   } catch (err) {
@@ -529,8 +530,9 @@ export function startAiChatEngine(): void {
     onMessage: (ev: DanmakuEvent) => {
       const text = ev.text.trim()
       if (!text) return
-      // Drop our own echoes and 大表情 emotes (display names, not textual context).
+      // Drop our own echoes, Copy Ninja group copies, and 大表情 emotes (display names, not textual context).
       if (isLikelySelfEcho(text)) return
+      if (ev.uid && isCopyNinjaMember(ev.uid)) return
       if (ev.hasLargeEmote) return
       const entry: ViewerChatEntry = {
         uname: ev.uname,

@@ -6,6 +6,7 @@ import { AboutTab } from './about-tab'
 import { AiChatSection } from './ai-chat-section'
 import { AutoBlendControls } from './auto-blend-controls'
 import { AutoSendControls } from './auto-send-controls'
+import { CopyNinjaTab } from './copy-ninja-tab'
 import { LogPanel } from './log-panel'
 import { MemesList } from './memes-list'
 import { NormalSendTab } from './normal-send-tab'
@@ -74,6 +75,10 @@ export function Configurator() {
 
       <div class={panelClass(tab === 'tongchuan')}>
         <SttTab />
+      </div>
+
+      <div class={panelClass(tab === 'ninja')}>
+        <CopyNinjaTab />
       </div>
 
       <div class={panelClass(tab === 'settings')}>

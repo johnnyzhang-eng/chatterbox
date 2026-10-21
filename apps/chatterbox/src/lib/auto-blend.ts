@@ -1,6 +1,7 @@
 import { computed, signal } from '@preact/signals'
 
 import { ensureRoomId, getCsrfToken, getDedeUid, setRandomDanmakuColor } from './api'
+import { isCopyNinjaMember } from './copy-ninja/settings'
 import { subscribeDanmaku } from './danmaku-stream'
 import { autoBlendDecisionEnabled } from './decision-settings'
 import { decideAutoBlendCandidate } from './decision-tasks'
@@ -195,8 +196,9 @@ function isBlacklisted(uid: string | null, text: string): boolean {
 function recordDanmaku(rawText: string, uid: string | null, isReply: boolean, hasLargeEmote: boolean): void {
   if (!autoBlendEnabled.value) return
 
-  // Self-echo: filtered above the cooldown gate so our own sends never inflate CPM or counters.
-  if (uid && myUid && uid === myUid) return
+  // Self-echo and Copy Ninja group copies: filtered above the cooldown gate so they never inflate CPM or
+  // counters; otherwise N mirrors copying one line look like an N-user trend and re-trigger the master.
+  if (uid && ((myUid && uid === myUid) || isCopyNinjaMember(uid))) return
 
   const now = Date.now()
   // CPM reflects ROOM activity, so record even messages filtered out below.
@@ -387,7 +389,7 @@ async function triggerSend(originalText: string, uniqueUsers: number, totalCount
     }
 
     if (!isCurrent()) return
-    const result = await enqueueDanmaku(toSend, roomId, csrfToken, SendPriority.AUTO)
+    const result = await enqueueDanmaku(toSend, roomId, csrfToken, SendPriority.AUTO, 'blend')
     const label = result.isEmoticon ? '自动融入(表情)' : '自动融入'
     const display = wasReplaced || toSend !== originalText ? `${originalText} → ${toSend}` : toSend
     appendLog(result, label, display)

@@ -93,7 +93,7 @@ function MemeItem({
 
       for (let i = 0; i < total; i++) {
         const segment = segments[i]
-        const result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.MANUAL)
+        const result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.MANUAL, 'meme')
         const label = total > 1 ? `烂梗 [${i + 1}/${total}]` : '烂梗'
         const display = wasReplaced && total === 1 ? `${meme.content} → ${segment}` : segment
 

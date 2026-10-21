@@ -133,14 +133,14 @@ export function NormalSendTab() {
 
       for (let i = 0; i < total; i++) {
         const segment = segments[i]
-        const result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.MANUAL)
+        const result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.MANUAL, 'manual')
         const baseLabel = result.isEmoticon ? '手动表情' : roadRaged ? '手动·路怒' : '手动'
         const label = total > 1 ? `${baseLabel} [${i + 1}/${total}]` : baseLabel
         const displayMsg = wasReplaced && total === 1 ? `${originalMessage} → ${segment}` : segment
 
         appendLog(result, label, displayMsg)
         if (!result.success) {
-          await tryAiEvasion(segment, roomId, csrfToken, '')
+          await tryAiEvasion(segment, roomId, csrfToken, '', 'manual')
         }
       }
     } catch (err) {

@@ -4,22 +4,37 @@
  * AUTO items but only reorder STT; the in-flight send is never cancelled.
  */
 
+import type { ActionSource } from '@laplace.live/kakashi-protocol'
+
 import { type SendDanmakuResult, sendDanmaku } from './api'
 
 /** Higher number = higher priority. Manual user actions jump ahead of automation. */
 export const SendPriority = {
   AUTO: 0,
   STT: 1,
+  /** Copy Ninja mirror copies; like STT, reorders ahead of AUTO but is never cancelled. */
+  COPY: 1,
   MANUAL: 2,
 } as const
 
 export type SendPriority = (typeof SendPriority)[keyof typeof SendPriority]
+
+/** Feature that produced a send; `copy` = a Copy Ninja mirror copy, which is never re-broadcast. */
+export type SendSource = ActionSource | 'copy'
+
+/** A send Bilibili accepted. */
+export interface SentDanmaku {
+  message: string
+  roomId: number
+  source: SendSource
+}
 
 interface QueueItem {
   message: string
   roomId: number
   csrfToken: string
   priority: SendPriority
+  source: SendSource
   resolve: (result: SendDanmakuResult) => void
   reject: (err: unknown) => void
   cancelled: boolean
@@ -31,6 +46,24 @@ const HARD_MIN_GAP_MS = 1010
 const queue: QueueItem[] = []
 let processing = false
 let lastSendCompletedAt = 0
+const sentListeners = new Set<(sent: SentDanmaku) => void>()
+
+/** Subscribe to accepted sends (Copy Ninja broadcasts from here); returns the unsubscribe. */
+export function onDanmakuSent(listener: (sent: SentDanmaku) => void): () => void {
+  sentListeners.add(listener)
+  return () => sentListeners.delete(listener)
+}
+
+function notifySent(item: QueueItem): void {
+  const sent: SentDanmaku = { message: item.message, roomId: item.roomId, source: item.source }
+  for (const listener of sentListeners) {
+    try {
+      listener(sent)
+    } catch (err) {
+      console.error('[LAPLACE Chatterbox] onDanmakuSent listener failed:', err)
+    }
+  }
+}
 
 /** Insert after all items with priority >= its own (FIFO within a level, highest level first). */
 function insertByPriority(item: QueueItem): void {
@@ -57,6 +90,7 @@ async function processQueue(): Promise<void> {
       try {
         const result = await sendDanmaku(item.message, item.roomId, item.csrfToken)
         lastSendCompletedAt = Date.now()
+        if (result.success) notifySent(item)
         item.resolve(result)
       } catch (err) {
         lastSendCompletedAt = Date.now()
@@ -76,10 +110,11 @@ export function enqueueDanmaku(
   message: string,
   roomId: number,
   csrfToken: string,
-  priority: SendPriority = SendPriority.AUTO
+  priority: SendPriority,
+  source: SendSource
 ): Promise<SendDanmakuResult> {
   return new Promise((resolve, reject) => {
-    const item: QueueItem = { message, roomId, csrfToken, priority, resolve, reject, cancelled: false }
+    const item: QueueItem = { message, roomId, csrfToken, priority, source, resolve, reject, cancelled: false }
     insertByPriority(item)
 
     if (priority === SendPriority.MANUAL) {

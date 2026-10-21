@@ -138,7 +138,7 @@ async function handleRepeat(msg: string, anchor?: { x: number; y: number }): Pro
       return
     }
     const processed = applyReplacements(toSend)
-    const result = await enqueueDanmaku(processed, roomId, csrfToken, SendPriority.MANUAL)
+    const result = await enqueueDanmaku(processed, roomId, csrfToken, SendPriority.MANUAL, 'repeat')
     // Show `original → final` when polish or replacement changed the text.
     const display = msg !== processed ? `${msg} → ${processed}` : processed
     appendLog(result, '+1', display)

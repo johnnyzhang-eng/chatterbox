@@ -190,10 +190,10 @@ export function SttTab() {
         appendLog('❌ 同传：未找到登录信息')
         return
       }
-      const result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.STT)
+      const result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.STT, 'stt')
       appendLog(result, '同传', segment)
       if (!result.success && !result.cancelled) {
-        await tryAiEvasion(segment, roomId, csrfToken, '同传')
+        await tryAiEvasion(segment, roomId, csrfToken, '同传', 'stt')
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)

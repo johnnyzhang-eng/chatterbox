@@ -5,6 +5,8 @@ import { startAudioOnly, stopAudioOnly } from '../lib/audio-only'
 import { startAutoBlend, stopAutoBlend } from '../lib/auto-blend'
 import { startAutoQuality, stopAutoQuality } from '../lib/auto-quality'
 import { startAutoSeek, stopAutoSeek } from '../lib/auto-seek'
+import { startCopyNinja, stopCopyNinja } from '../lib/copy-ninja/client'
+import { copyNinjaEnabled, copyNinjaServerUrl, copyNinjaToken } from '../lib/copy-ninja/settings'
 import { startDanmakuDirect, stopDanmakuDirect } from '../lib/danmaku-direct'
 import { loop } from '../lib/loop'
 import { PLAYER_WATERMARK_SELECTOR } from '../lib/player-dom'
@@ -60,6 +62,13 @@ export function AppRoom() {
     }
     return () => stopAiChatEngine()
   }, [aiChatEnabled.value])
+
+  // Reconnects when the URL or token is committed (inputs write on change, not per keystroke).
+  useEffect(() => {
+    if (!copyNinjaEnabled.value) return
+    startCopyNinja()
+    return () => stopCopyNinja()
+  }, [copyNinjaEnabled.value, copyNinjaServerUrl.value, copyNinjaToken.value])
 
   // Always-on so users can pre-blacklist spammers via the chat-item menu even while 自动融入 is off.
   useEffect(() => {

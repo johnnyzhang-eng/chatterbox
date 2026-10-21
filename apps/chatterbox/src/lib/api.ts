@@ -4,7 +4,7 @@ import { BASE_URL } from './const'
 import { isEmoticonUnique } from './emoticon'
 import { buildReplacementMap } from './replacement'
 import { availableDanmakuColors, cachedEmoticonPackages, cachedRoomId, cachedStreamerUid } from './store'
-import { extractRoomNumber } from './utils'
+import { extractRoomNumber, readPath } from './utils'
 import { cachedWbiKeys, encodeWbi } from './wbi'
 
 /** Default Bilibili danmaku color palette (used when room config not loaded). */
@@ -46,6 +46,17 @@ export function getCsrfToken(): string | undefined {
 /** Gets the logged-in user's UID from browser cookies (DedeUserID). */
 export function getDedeUid(): string | undefined {
   return getCookie('DedeUserID')
+}
+
+/** Logged-in user's display name from the nav API; null when unavailable. */
+export async function fetchSelfUname(): Promise<string | null> {
+  try {
+    const resp = await fetch(BASE_URL.BILIBILI_NAV, { credentials: 'include' })
+    const uname = readPath(await resp.json(), 'data', 'uname')
+    return typeof uname === 'string' && uname ? uname : null
+  } catch {
+    return null
+  }
 }
 
 /** Fetches the real room ID for a Bilibili live room from the API. */

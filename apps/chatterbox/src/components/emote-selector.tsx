@@ -69,7 +69,7 @@ export function EmoteSelector() {
         appendLog('❌ 未找到登录信息，请先登录 Bilibili')
         return
       }
-      const result = await enqueueDanmaku(unique, roomId, csrfToken, SendPriority.MANUAL)
+      const result = await enqueueDanmaku(unique, roomId, csrfToken, SendPriority.MANUAL, 'emote')
       appendLog(result, '手动表情', unique)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)

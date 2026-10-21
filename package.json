@@ -3,11 +3,14 @@
   "private": true,
   "type": "module",
   "workspaces": [
-    "apps/*"
+    "apps/*",
+    "packages/*"
   ],
   "scripts": {
     "dev": "bun run --cwd apps/chatterbox dev",
     "build": "bun run --cwd apps/chatterbox build",
+    "dev:server": "bun run --cwd apps/kakashi-server dev",
+    "build:server": "bun run --cwd apps/kakashi-server build",
     "lint": "biome check",
     "typecheck": "bun run --workspaces typecheck",
     "test": "bun test"
