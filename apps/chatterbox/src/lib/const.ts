@@ -4,8 +4,8 @@ export const PROJECT_URL = 'https://laplace.live/chatterbox'
 export const GITHUB_URL = 'https://github.com/laplace-live/chatterbox'
 export const DOCUMENT_URL = 'https://laplace.live/chatterbox'
 
-/** Soniox STT SDK. ESM-only; point at the package's self-contained `dist/index.mjs` (no bare-specifier imports) to avoid a transitive-dep waterfall. */
-export const SONIOX_CDN_URL = 'https://unpkg.com/@soniox/client@2.2.0/dist/index.mjs'
+/** Soniox STT SDK. ESM-only; point at the package's self-contained `dist/index.mjs` (no bare-specifier imports) to avoid a transitive-dep waterfall. Keep in sync with the `@soniox/client` devDependency (types only). */
+export const SONIOX_CDN_URL = 'https://unpkg.com/@soniox/client@2.4.0/dist/index.mjs'
 
 /** Soniox REST API root; append a path e.g. `${SONIOX_API_BASE}/models`. */
 export const SONIOX_API_BASE = 'https://api.soniox.com/v1'
