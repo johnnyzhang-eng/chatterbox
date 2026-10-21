@@ -59,6 +59,7 @@ jobs:
           # and creates a GitHub Release per tag from its CHANGELOG entry.
           publish-script: bun run release
           version-script: bun run version
+          commit-message: "Version Packages [skip ci]"
           # The @laplace.live/kakashi-server Release fires build-server.yml's
           # `release: created` trigger, which builds, signs and uploads the
           # binaries. v2 reads the token only from this input, not from the
