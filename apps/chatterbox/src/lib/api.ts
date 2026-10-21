@@ -48,10 +48,10 @@ export function getDedeUid(): string | undefined {
   return getCookie('DedeUserID')
 }
 
-/** Logged-in user's display name from the nav API; null when unavailable. */
+/** Logged-in user's display name from the nav API; null when unavailable or slower than 5 s. */
 export async function fetchSelfUname(): Promise<string | null> {
   try {
-    const resp = await fetch(BASE_URL.BILIBILI_NAV, { credentials: 'include' })
+    const resp = await fetch(BASE_URL.BILIBILI_NAV, { credentials: 'include', signal: AbortSignal.timeout(5000) })
     const uname = readPath(await resp.json(), 'data', 'uname')
     return typeof uname === 'string' && uname ? uname : null
   } catch {

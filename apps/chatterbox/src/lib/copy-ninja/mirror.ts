@@ -6,12 +6,13 @@ import { appendLog } from '../log'
 import { enqueueDanmaku, SendPriority } from '../send-queue'
 import { cachedRoomId, maxLength } from '../store'
 import { formatDanmakuError, processMessages } from '../utils'
-import { pickDelayMs, planCopy } from './decay'
+import { pickDelayMs, planCopy, shouldFollow } from './decisions'
 import {
   copyNinjaDelayMaxSec,
   copyNinjaDelayMinSec,
   copyNinjaDropPercent,
   copyNinjaFollowRoom,
+  copyNinjaMasterRoomId,
   copyNinjaPaused,
   isCopySourceEnabled,
   SOURCE_LABELS,
@@ -19,18 +20,35 @@ import {
 
 export type ReportResult = (eventId: string, status: CopyStatus, detail?: string) => void
 
-/** A copy firing this long after its planned time (throttled background tab, long queue) is dropped as stale. */
+interface PendingCopy {
+  msg: ActionDeliveryMessage
+  plannedAt: number
+  report: ReportResult
+}
+
+/** A copy still unsent this long after its planned time (throttled background tab, long queue) is dropped as stale. */
 const STALE_MS = 10_000
 const MAX_PENDING = 20
 const PAUSE_AFTER_FAILURES = 3
 const FOLLOW_DELAY_MIN_SEC = 2
 const FOLLOW_DELAY_MAX_SEC = 5
 
-const pendingTimers = new Set<ReturnType<typeof setTimeout>>()
-let followTimer: ReturnType<typeof setTimeout> | null = null
+// Copies run one at a time in arrival order, so a master message split into segments can't be copied out of order.
+const pending: PendingCopy[] = []
+let draining = false
+let lastPlannedAt = 0
+/** Bumped by {@link cancelPendingCopies}; a copy from an older generation never posts, even from the send queue. */
+let generation = 0
+let wakeDrain: (() => void) | null = null
+let drainTimer: ReturnType<typeof setTimeout> | null = null
 let consecutiveFailures = 0
 
-/** Apply this mirror's source filter and decay to a master action, then copy it after the planned delay. */
+/** Room the server last asked this tab to follow; it picks one tab per account, so other tabs never get one. */
+let followTarget: number | null = null
+let followTimer: ReturnType<typeof setTimeout> | null = null
+let followTimerRoom: number | null = null
+
+/** Apply this mirror's source filter and decay to a master action, then queue the copy after its delay. */
 export function handleMirrorAction(msg: ActionDeliveryMessage, report: ReportResult): void {
   const { eventId, action } = msg
   if (copyNinjaPaused.value) {
@@ -52,19 +70,43 @@ export function handleMirrorAction(msg: ActionDeliveryMessage, report: ReportRes
     report(eventId, 'dropped', '衰减忽略')
     return
   }
-  if (pendingTimers.size >= MAX_PENDING) {
+  if (pending.length >= MAX_PENDING) {
     report(eventId, 'skipped', '待发送队列已满')
     return
   }
-  const plannedAt = Date.now() + plan.delayMs
-  const timer = setTimeout(() => {
-    pendingTimers.delete(timer)
-    void copyAction(msg, plannedAt, report)
-  }, plan.delayMs)
-  pendingTimers.add(timer)
+  // Never earlier than the copy before it, so random delays can't reorder copies.
+  lastPlannedAt = Math.max(Date.now() + plan.delayMs, lastPlannedAt)
+  pending.push({ msg, plannedAt: lastPlannedAt, report })
+  void drain()
 }
 
-async function copyAction({ eventId, action }: ActionDeliveryMessage, plannedAt: number, report: ReportResult) {
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => {
+    wakeDrain = resolve
+    drainTimer = setTimeout(resolve, ms)
+  })
+}
+
+async function drain(): Promise<void> {
+  if (draining) return
+  draining = true
+  try {
+    while (pending.length > 0) {
+      const next = pending[0]
+      const wait = next.plannedAt - Date.now()
+      if (wait > 0) await sleep(wait)
+      // A cancel while sleeping empties the queue (and may refill it for a new session).
+      if (pending[0] !== next) continue
+      pending.shift()
+      await copyAction(next, generation)
+    }
+  } finally {
+    draining = false
+  }
+}
+
+async function copyAction({ msg: { eventId, action }, plannedAt, report }: PendingCopy, gen: number) {
+  if (gen !== generation) return
   if (copyNinjaPaused.value) return report(eventId, 'skipped', '分身已暂停')
   if (Date.now() - plannedAt > STALE_MS) return report(eventId, 'skipped', '已过期')
   const roomId = cachedRoomId.value
@@ -73,14 +115,15 @@ async function copyAction({ eventId, action }: ActionDeliveryMessage, plannedAt:
   if (!csrfToken) return report(eventId, 'failed', '未登录')
 
   // Re-check emotes and length against THIS account: its unlocks and length cap can differ from the master's.
-  const isEmote = isEmoticonUnique(action.text)
-  if (isEmote && (isLockedEmoticon(action.text) || isUnavailableEmoticon(action.text))) {
+  if (isUnavailableEmoticon(action.text) || isLockedEmoticon(action.text)) {
     return report(eventId, 'skipped', '该账号无法使用此表情')
   }
-  const segments = isEmote ? [action.text] : processMessages(action.text, maxLength.value)
+  const segments = isEmoticonUnique(action.text) ? [action.text] : processMessages(action.text, maxLength.value)
+  const stillWanted = () => gen === generation && !copyNinjaPaused.value && Date.now() - plannedAt <= STALE_MS
   const label = `跟随·${SOURCE_LABELS[action.source]}`
   for (const segment of segments) {
-    const result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.COPY, 'copy')
+    const result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.COPY, 'copy', stillWanted)
+    if (result.cancelled) return report(eventId, 'skipped', '已取消')
     appendLog(result, label, segment)
     if (!result.success) {
       recordFailure()
@@ -105,24 +148,66 @@ export function resumeMirror(): void {
   copyNinjaPaused.value = false
 }
 
-/** Navigate to the master's room after a short random delay; a newer follow replaces a pending one. */
+/** Drop queued and in-queue copies (disconnect, stop, pause). */
+export function cancelPendingCopies(): void {
+  generation++
+  pending.length = 0
+  lastPlannedAt = 0
+  if (drainTimer) clearTimeout(drainTimer)
+  drainTimer = null
+  wakeDrain?.()
+  wakeDrain = null
+}
+
+/** Record the room the server asked this tab to follow, then act on it if following is on. */
 export function handleFollow(roomId: number): void {
-  if (!copyNinjaFollowRoom.value || copyNinjaPaused.value) return
-  const current = cachedRoomId.value
-  if (current === null || current === roomId) return
-  if (followTimer) clearTimeout(followTimer)
+  followTarget = roomId
+  refreshFollow()
+}
+
+/**
+ * Schedule or cancel the move to {@link followTarget}. Reads every input signal up front so an `effect` around it
+ * re-runs when following is toggled, the master moves, or the pause changes.
+ */
+export function refreshFollow(): void {
+  const enabled = copyNinjaFollowRoom.value
+  const paused = copyNinjaPaused.value
+  const masterRoomId = copyNinjaMasterRoomId.value
+  const currentRoomId = cachedRoomId.value
+  const target = followTarget
+  if (target === null || !shouldFollow({ enabled, paused, target, masterRoomId, currentRoomId })) {
+    cancelFollow()
+    return
+  }
+  if (followTimer && followTimerRoom === target) return
+  cancelFollow()
   const delayMs = pickDelayMs(FOLLOW_DELAY_MIN_SEC, FOLLOW_DELAY_MAX_SEC)
-  appendLog(`🥷 主控前往直播间 ${roomId}，${Math.round(delayMs / 1000)} 秒后跟随`)
+  appendLog(`🥷 主控在直播间 ${target}，${Math.round(delayMs / 1000)} 秒后跟随`)
+  followTimerRoom = target
   followTimer = setTimeout(() => {
     followTimer = null
-    location.assign(`https://live.bilibili.com/${roomId}`)
+    followTimerRoom = null
+    // Re-checked at fire time: the master may have come back, or following may have been turned off.
+    const still = shouldFollow({
+      enabled: copyNinjaFollowRoom.value,
+      paused: copyNinjaPaused.value,
+      target,
+      masterRoomId: copyNinjaMasterRoomId.value,
+      currentRoomId: cachedRoomId.value,
+    })
+    if (still && followTarget === target) location.assign(`https://live.bilibili.com/${target}`)
   }, delayMs)
 }
 
-/** Drop scheduled copies and any pending follow (disconnect, stop, pause). */
-export function cancelPendingCopies(): void {
-  for (const timer of pendingTimers) clearTimeout(timer)
-  pendingTimers.clear()
+function cancelFollow(): void {
   if (followTimer) clearTimeout(followTimer)
   followTimer = null
+  followTimerRoom = null
+}
+
+/** Forget all mirror state when Copy Ninja stops. */
+export function resetMirror(): void {
+  cancelPendingCopies()
+  cancelFollow()
+  followTarget = null
 }

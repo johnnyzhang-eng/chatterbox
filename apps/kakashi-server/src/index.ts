@@ -99,7 +99,7 @@ try {
   )
 }
 
-const url = `ws://${hostname.includes(':') ? `[${hostname}]` : hostname}:${running.server.port}`
+const url = running.server.url.href.replace(/^http/, 'ws').replace(/\/$/, '')
 console.log(`🥷 LAPLACE Kakashi Server v${pkg.version} (protocol ${PROTOCOL_VERSION})`)
 console.log(`🚀 Listening on ${url}`)
 console.log(`🔐 Token: ${token ? 'required' : 'off (loopback only)'}`)

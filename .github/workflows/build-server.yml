@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-unix:
@@ -124,16 +124,6 @@ jobs:
           name: ${{ matrix.artifact_name }}
           path: apps/kakashi-server/dist/kakashi-server-*
 
-      - name: Upload to GitHub release
-        if: github.event_name == 'release'
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: apps/kakashi-server/dist/kakashi-server-*
-          file_glob: true
-          tag: ${{ github.ref }}
-          overwrite: true
-
   build-windows:
     # Same filter as build-unix.
     if: github.event_name != 'release' || startsWith(github.event.release.tag_name, '@laplace.live/kakashi-server@')
@@ -172,11 +162,26 @@ jobs:
           name: windows-binaries
           path: apps/kakashi-server/dist/kakashi-server-windows-x64.exe
 
+  # The only job with write access: builds (which run PR code) stay read-only.
+  release-assets:
+    needs: [build-unix, build-windows]
+    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, '@laplace.live/kakashi-server@')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: '*-binaries'
+          path: dist
+          merge-multiple: true
+
       - name: Upload to GitHub release
-        if: github.event_name == 'release'
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: apps/kakashi-server/dist/kakashi-server-windows-x64.exe
+          file: dist/kakashi-server-*
+          file_glob: true
           tag: ${{ github.ref }}
           overwrite: true

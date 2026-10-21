@@ -86,6 +86,11 @@ export class Hub {
     const peer = this.peers.get(id)
     if (!peer) return
     if (presence.visible && !peer.visible) peer.activeAt = this.now()
+    if (presence.roomId !== peer.roomId) {
+      // A tab that just moved is the active one, and any follow sent before the move no longer applies.
+      peer.activeAt = this.now()
+      this.lastFollow.delete(peer.uid)
+    }
     peer.role = presence.role
     peer.roomId = presence.roomId
     peer.visible = presence.visible
@@ -133,6 +138,10 @@ export class Hub {
     const sender = this.peers.get(id)
     const entry = this.pending.get(eventId)
     if (!sender || !entry) return
+    if (entry.expiresAt <= this.now()) {
+      this.pending.delete(eventId)
+      return
+    }
     const line = `${status === 'failed' ? '✗' : '·'} ${label(sender)} ${status}${detail ? `: ${detail}` : ''}`
     if (status === 'failed') this.log(line)
     else this.debug(line)

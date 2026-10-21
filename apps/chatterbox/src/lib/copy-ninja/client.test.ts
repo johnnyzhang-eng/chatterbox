@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { join } from 'node:path'
 import type { BunPlugin } from 'bun'
 
@@ -70,15 +70,18 @@ async function loadClient(uid: string, gm: Record<string, unknown>): Promise<Har
       export function emitSent(item) {
         for (const listener of listeners) listener(item)
       }
-      export async function enqueueDanmaku(message, roomId, csrfToken, priority, source) {
+      export async function enqueueDanmaku(message, roomId, csrfToken, priority, source, guard) {
+        await Promise.resolve()
+        if (guard && !guard()) return { success: false, cancelled: true, message, isEmoticon: false, error: 'cancelled' }
         sent.push({ message, roomId, priority, source })
         return { success: true, message, isEmoticon: false }
       }
     `,
     [join(LIB, 'emoticon.ts')]: `
+      // As if the mirror's cache lacks every emote: ID-shaped text is unavailable to this account.
       export const isEmoticonUnique = () => false
       export const isLockedEmoticon = () => false
-      export const isUnavailableEmoticon = () => false
+      export const isUnavailableEmoticon = text => /^[a-z]+(_\\d+)+$/.test(text)
     `,
   }
   const gmStub: BunPlugin = {
@@ -92,6 +95,7 @@ async function loadClient(uid: string, gm: Record<string, unknown>): Promise<Har
           export const GM_getValue = (key, fallback) => (values.has(key) ? values.get(key) : fallback)
           export const GM_setValue = (key, value) => values.set(key, value)
           export const GM_deleteValue = key => values.delete(key)
+          export const GM_addValueChangeListener = () => 0
           export const GM_info = { script: { version: 'test' } }
         `,
       }))
@@ -151,7 +155,7 @@ async function setup() {
       master.settings.copyNinjaRoster.value.length === 2,
     'both accounts to join'
   )
-  return { master, mirror, resultFor: (uid: string) => master.settings.copyNinjaResults.value[uid] }
+  return { server, master, mirror, resultFor: (uid: string) => master.settings.copyNinjaResults.value[uid] }
 }
 
 test('a master send is copied by the mirror and the result is reported back', async () => {
@@ -175,10 +179,12 @@ test('each mirror applies its own source toggles and decay', async () => {
 })
 
 test('copies and mirror sends are never re-broadcast, and group uids are flagged', async () => {
-  const { master, mirror } = await setup()
+  const { server, master, mirror } = await setup()
+  const broadcasts = spyOn(server.hub, 'action')
   mirror.sendQueue.emitSent({ message: '分身自己发的', roomId: ROOM, source: 'manual' })
   master.sendQueue.emitSent({ message: '跟随副本', roomId: ROOM, source: 'copy' })
   await Bun.sleep(100)
+  expect(broadcasts).not.toHaveBeenCalled()
   expect(master.sendQueue.sent).toHaveLength(0)
   expect(mirror.sendQueue.sent).toHaveLength(0)
   expect(master.settings.isCopyNinjaMember('2')).toBe(true)
@@ -207,4 +213,35 @@ test('a wrong token stops retrying with a readable reason', async () => {
   client.startCopyNinja()
   await until(() => client.settings.copyNinjaStatus.value === 'error', 'the auth failure')
   expect(client.settings.copyNinjaStatusDetail.value).toContain('令牌错误')
+})
+
+test('copies keep the master order even when random delays would reorder them', async () => {
+  const { master, mirror } = await setup()
+  mirror.settings.copyNinjaDelayMaxSec.value = 0.3
+  for (const message of ['第一段', '第二段', '第三段']) {
+    master.sendQueue.emitSent({ message, roomId: ROOM, source: 'manual' })
+  }
+  await until(() => mirror.sendQueue.sent.length === 3, 'all three copies')
+  expect(mirror.sendQueue.sent.map(item => item.message)).toEqual(['第一段', '第二段', '第三段'])
+})
+
+test('stopping drops copies that are still waiting out their delay', async () => {
+  const { server, master, mirror } = await setup()
+  mirror.settings.copyNinjaDelayMinSec.value = 1
+  mirror.settings.copyNinjaDelayMaxSec.value = 1
+  const broadcasts = spyOn(server.hub, 'action')
+  master.sendQueue.emitSent({ message: '晚上好', roomId: ROOM, source: 'manual' })
+  await until(() => broadcasts.mock.calls.length === 1, 'the broadcast')
+  await Bun.sleep(100)
+  mirror.stopCopyNinja()
+  await Bun.sleep(1200)
+  expect(mirror.sendQueue.sent).toHaveLength(0)
+})
+
+test('an emote this mirror lacks is skipped instead of posted as text', async () => {
+  const { master, mirror, resultFor } = await setup()
+  master.sendQueue.emitSent({ message: 'room_21452505_12345', roomId: ROOM, source: 'emote' })
+  await until(() => resultFor('2')?.status === 'skipped', 'the emote skip')
+  expect(resultFor('2')?.detail).toBe('该账号无法使用此表情')
+  expect(mirror.sendQueue.sent).toHaveLength(0)
 })

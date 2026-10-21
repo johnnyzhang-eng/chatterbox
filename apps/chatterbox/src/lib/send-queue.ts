@@ -35,6 +35,7 @@ interface QueueItem {
   csrfToken: string
   priority: SendPriority
   source: SendSource
+  guard?: () => boolean
   resolve: (result: SendDanmakuResult) => void
   reject: (err: unknown) => void
   cancelled: boolean
@@ -87,6 +88,10 @@ async function processQueue(): Promise<void> {
           await new Promise(r => setTimeout(r, HARD_MIN_GAP_MS - sinceLast))
         }
       }
+      if (item.guard && !item.guard()) {
+        item.resolve({ success: false, cancelled: true, message: item.message, isEmoticon: false, error: 'cancelled' })
+        continue
+      }
       try {
         const result = await sendDanmaku(item.message, item.roomId, item.csrfToken)
         lastSendCompletedAt = Date.now()
@@ -105,16 +110,18 @@ async function processQueue(): Promise<void> {
 /**
  * Enqueue a danmaku send; resolves with the same {@link SendDanmakuResult} as raw {@link sendDanmaku}.
  * A preempted item (only AUTO, only by MANUAL) resolves with `cancelled: true` rather than a fake send.
+ * @param guard Runs right before the POST, after any wait in the queue; `false` resolves `cancelled: true` unsent.
  */
 export function enqueueDanmaku(
   message: string,
   roomId: number,
   csrfToken: string,
   priority: SendPriority,
-  source: SendSource
+  source: SendSource,
+  guard?: () => boolean
 ): Promise<SendDanmakuResult> {
   return new Promise((resolve, reject) => {
-    const item: QueueItem = { message, roomId, csrfToken, priority, source, resolve, reject, cancelled: false }
+    const item: QueueItem = { message, roomId, csrfToken, priority, source, guard, resolve, reject, cancelled: false }
     insertByPriority(item)
 
     if (priority === SendPriority.MANUAL) {

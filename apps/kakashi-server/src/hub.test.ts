@@ -39,6 +39,9 @@ function createHub(options: { masterGraceMs?: number } = {}) {
     hub,
     join,
     received,
+    advance: (ms: number) => {
+      now += ms
+    },
     clear: () => {
       for (const messages of inbox.values()) messages.splice(0)
     },
@@ -121,6 +124,18 @@ describe('action routing', () => {
     expect(received('s', 'action')).toHaveLength(0)
   })
 
+  test('drops results that arrive after the pending entry expired', () => {
+    const { hub, join, received, advance } = createHub()
+    join('m', '1', 'master', ROOM)
+    join('x', '2', 'mirror', ROOM)
+    hub.action('m', action)
+    const [delivery] = received('x', 'action')
+    if (delivery?.type !== 'action') throw new Error('expected an action delivery')
+    advance(5 * 60_000)
+    hub.result('x', delivery.eventId, 'sent')
+    expect(received('m', 'result')).toHaveLength(0)
+  })
+
   test('forwards a mirror result back to the broadcasting tab', () => {
     const { hub, join, received } = createHub()
     join('m', '1', 'master', ROOM)
@@ -164,5 +179,27 @@ describe('room following', () => {
     expect(received('x', 'follow')).toHaveLength(0)
     hub.update('x', { role: 'mirror', roomId: OTHER_ROOM, visible: true })
     expect(received('x', 'follow')).toEqual([{ type: 'follow', roomId: ROOM }])
+  })
+
+  test('re-sends a follow after a tab moves to yet another room', () => {
+    const { hub, join, received } = createHub()
+    join('m', '1', 'master', ROOM)
+    join('x', '2', 'mirror', OTHER_ROOM)
+    hub.update('x', { role: 'mirror', roomId: 300, visible: true })
+    expect(received('x', 'follow')).toEqual([
+      { type: 'follow', roomId: ROOM },
+      { type: 'follow', roomId: ROOM },
+    ])
+  })
+
+  test('follows a master tab that changed rooms even while another master tab is visible', () => {
+    const { hub, join, received, advance } = createHub()
+    join('m1', '1', 'master', ROOM)
+    join('m2', '1', 'master', ROOM)
+    join('x', '2', 'mirror', ROOM)
+    advance(10)
+    hub.update('m1', { role: 'master', roomId: OTHER_ROOM, visible: true })
+    expect(hub.roster().masterRoomId).toBe(OTHER_ROOM)
+    expect(received('x', 'follow')).toEqual([{ type: 'follow', roomId: OTHER_ROOM }])
   })
 })

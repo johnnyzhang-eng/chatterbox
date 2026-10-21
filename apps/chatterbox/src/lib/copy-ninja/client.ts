@@ -7,10 +7,12 @@ import { appendLog } from '../log'
 import { onDanmakuSent } from '../send-queue'
 import { cachedRoomId } from '../store'
 import { VERSION } from '../version'
-import { cancelPendingCopies, handleFollow, handleMirrorAction } from './mirror'
+import { cancelPendingCopies, handleFollow, handleMirrorAction, refreshFollow, resetMirror } from './mirror'
 import {
   copyNinjaClaimedRole,
   copyNinjaEffectiveRole,
+  copyNinjaKnownUids,
+  copyNinjaMasterRoomId,
   copyNinjaResults,
   copyNinjaRoster,
   copyNinjaSelfUid,
@@ -19,6 +21,7 @@ import {
   copyNinjaStatus,
   copyNinjaStatusDetail,
   copyNinjaToken,
+  rememberMembers,
 } from './settings'
 
 const RETRY_MIN_MS = 1000
@@ -56,6 +59,8 @@ function handleMessage(msg: ServerMessage): void {
       break
     case 'roster':
       copyNinjaRoster.value = msg.members
+      copyNinjaMasterRoomId.value = msg.masterRoomId
+      rememberMembers(msg.members)
       break
     case 'action':
       if (copyNinjaEffectiveRole.value === 'mirror') handleMirrorAction(msg, reportResult)
@@ -125,6 +130,7 @@ function connect(id: number, uid: string): void {
     if (socket !== ws) return
     socket = null
     copyNinjaRoster.value = []
+    copyNinjaMasterRoomId.value = null
     cancelPendingCopies()
     if (id !== session) return
     const fatal = fatalCloseReason(e.code)
@@ -174,6 +180,8 @@ export function startCopyNinja(): void {
     })
   )
 
+  disposers.push(effect(() => refreshFollow()))
+
   disposers.push(
     onDanmakuSent(sent => {
       if (sent.source === 'copy' || copyNinjaEffectiveRole.value !== 'master') return
@@ -200,8 +208,10 @@ export function stopCopyNinja(): void {
   const ws = socket
   socket = null
   ws?.close(1000)
-  cancelPendingCopies()
+  resetMirror()
   copyNinjaRoster.value = []
+  copyNinjaMasterRoomId.value = null
+  copyNinjaKnownUids.value = new Set()
   copyNinjaResults.value = {}
   copyNinjaStatus.value = 'off'
   copyNinjaStatusDetail.value = ''

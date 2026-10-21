@@ -28,3 +28,17 @@ export function planCopy({
   if (dropPercent > 0 && random() * 100 < dropPercent) return { kind: 'drop' }
   return { kind: 'send', delayMs: pickDelayMs(delayMinSec, delayMaxSec, random) }
 }
+
+export interface FollowInput {
+  enabled: boolean
+  paused: boolean
+  /** Room the server last asked this tab to follow. */
+  target: number
+  masterRoomId: number | null
+  currentRoomId: number | null
+}
+
+/** Whether to move to `target`: following is on, it is still the master's room, and this tab isn't there yet. */
+export function shouldFollow({ enabled, paused, target, masterRoomId, currentRoomId }: FollowInput): boolean {
+  return enabled && !paused && masterRoomId === target && currentRoomId !== null && currentRoomId !== target
+}

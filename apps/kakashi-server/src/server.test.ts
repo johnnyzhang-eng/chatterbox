@@ -67,6 +67,12 @@ describe('handshake', () => {
     expect(await closed).not.toBe(1000)
   })
 
+  test('rejects opaque and extension origins by default', async () => {
+    const url = start()
+    expect(await connect(url, hello({}), 'null').closed).not.toBe(1000)
+    expect(await connect(url, hello({}), 'chrome-extension://abc').closed).not.toBe(1000)
+  })
+
   test('closes with UNAUTHORIZED on a wrong token', async () => {
     const url = start('secret')
     const { closed } = connect(url, hello({ token: 'nope' }))

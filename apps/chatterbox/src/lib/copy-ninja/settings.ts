@@ -16,18 +16,23 @@ export const SOURCE_LABELS: Record<ActionSource, string> = {
   stt: '同传',
 }
 
-export const copyNinjaEnabled = gmSignal('copyNinjaEnabled', false)
-export const copyNinjaServerUrl = gmSignal('copyNinjaServerUrl', DEFAULT_SERVER_URL)
-export const copyNinjaToken = gmSignal('copyNinjaToken', '')
+// All synced across tabs: one account's tabs must agree, or a stale tab keeps claiming master or copies with old settings.
+const SYNC = { syncTabs: true }
+
+export const copyNinjaEnabled = gmSignal('copyNinjaEnabled', false, SYNC)
+export const copyNinjaServerUrl = gmSignal('copyNinjaServerUrl', DEFAULT_SERVER_URL, SYNC)
+export const copyNinjaToken = gmSignal('copyNinjaToken', '', SYNC)
 // Keyed by uid so importing one profile's settings into another account can't clone a master; unset = mirror.
-export const copyNinjaRoles = gmSignal<Record<string, Role>>('copyNinjaRoles', {})
+export const copyNinjaRoles = gmSignal<Record<string, Role>>('copyNinjaRoles', {}, SYNC)
 // Mirror-side: which master sources this account copies (unset = copy).
-export const copyNinjaSources = gmSignal<Partial<Record<ActionSource, boolean>>>('copyNinjaSources', {})
+export const copyNinjaSources = gmSignal<Partial<Record<ActionSource, boolean>>>('copyNinjaSources', {}, SYNC)
 // Mirror-side decay: % of master actions to ignore, plus a random delay so copies don't land together.
-export const copyNinjaDropPercent = gmSignal('copyNinjaDropPercent', 0)
-export const copyNinjaDelayMinSec = gmSignal('copyNinjaDelayMinSec', 1)
-export const copyNinjaDelayMaxSec = gmSignal('copyNinjaDelayMaxSec', 4)
-export const copyNinjaFollowRoom = gmSignal('copyNinjaFollowRoom', false)
+export const copyNinjaDropPercent = gmSignal('copyNinjaDropPercent', 0, SYNC)
+export const copyNinjaDelayMinSec = gmSignal('copyNinjaDelayMinSec', 1, SYNC)
+export const copyNinjaDelayMaxSec = gmSignal('copyNinjaDelayMaxSec', 4, SYNC)
+export const copyNinjaFollowRoom = gmSignal('copyNinjaFollowRoom', false, SYNC)
+/** Set after repeated copy failures (mute / risk control); persisted so a reload or room follow can't resume copying. */
+export const copyNinjaPaused = gmSignal('copyNinjaPaused', false, SYNC)
 
 export type CopyNinjaStatus = 'off' | 'connecting' | 'connected' | 'error'
 
@@ -37,8 +42,10 @@ export const copyNinjaStatusDetail = signal('')
 export const copyNinjaServerVersion = signal('')
 export const copyNinjaSelfUid = signal<string | null>(null)
 export const copyNinjaRoster = signal<Member[]>([])
-/** Set after repeated copy failures (mute / risk control); copies stop until resumed. */
-export const copyNinjaPaused = signal(false)
+/** Room of the master's active tab, from the latest roster. */
+export const copyNinjaMasterRoomId = signal<number | null>(null)
+/** Every uid seen in a roster this session; kept through reconnects so in-flight copies stay filtered. */
+export const copyNinjaKnownUids = signal<ReadonlySet<string>>(new Set())
 
 /** Master-side: latest copy result per mirror uid. */
 export const copyNinjaResults = signal<Record<string, { status: CopyStatus; detail?: string }>>({})
@@ -55,11 +62,16 @@ export const copyNinjaEffectiveRole = computed<MemberRole | null>(() => {
   return copyNinjaRoster.value.find(member => member.uid === uid)?.role ?? null
 })
 
-const memberUids = computed(() => new Set(copyNinjaRoster.value.map(member => member.uid)))
-
 /** Whether `uid` belongs to this Copy Ninja group, so trend/AI features can ignore its copies. */
 export function isCopyNinjaMember(uid: string): boolean {
-  return memberUids.value.has(uid)
+  return copyNinjaKnownUids.value.has(uid)
+}
+
+/** Add roster uids to {@link copyNinjaKnownUids}; no-op when nothing is new. */
+export function rememberMembers(members: readonly Member[]): void {
+  const known = copyNinjaKnownUids.value
+  if (members.every(member => known.has(member.uid))) return
+  copyNinjaKnownUids.value = new Set([...known, ...members.map(member => member.uid)])
 }
 
 /** Whether this mirror copies `source`. */

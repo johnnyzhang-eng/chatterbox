@@ -47,9 +47,9 @@ Then, in each browser, open a Bilibili live room → Chatterbox → **忍者** t
 
 ## Things to know
 
-- **Run it on the same machine as the browsers.** Bilibili pages are HTTPS, and browsers only allow plain `ws://` to loopback from them, so browsers on other machines would need `wss://` behind a TLS proxy.
+- **Run it on the same machine as the browsers.** Bilibili pages are HTTPS, and browsers only let them open unencrypted WebSockets to loopback, so browsers on other machines would need `wss://` behind a TLS proxy.
 - **Chrome asks once per profile.** Chrome 147+ shows a "local network access" prompt the first time a live room connects to the server. Allow it. If you denied it, re-enable it in the site settings for live.bilibili.com.
-- **Origins are checked.** The server only accepts handshakes from `https://live.bilibili.com` and userscript-manager extension origins, so other websites can't connect and drive your accounts. Rejected origins are logged with a hint.
+- **Origins are checked.** The server only accepts handshakes from `https://live.bilibili.com`, so other websites, sandboxed pages and unrelated extensions can't connect and drive your accounts. If your userscript manager connects from its own extension origin instead, the server logs the rejected origin. Allow that exact origin with `--allow-origin`.
 - **Keep mirror tabs alive.** Background tabs get throttled and Chrome's Memory Saver may discard them. Exempt live.bilibili.com if mirrors drop out.
 - **Mirrors pause themselves** after 3 consecutive failed copies (mute, risk control). Resume from the 忍者 tab.
 - **Decay is not anonymity.** It makes copies less alike in content and timing. Bilibili can still link accounts by IP and device, so mirror accounts can get muted or banned.
