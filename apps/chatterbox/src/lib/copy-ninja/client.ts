@@ -191,6 +191,13 @@ export function startCopyNinja(): void {
 
   disposers.push(effect(() => refreshFollow()))
 
+  // A pause synced from another tab of this account must stop this tab's queue and rewrites too.
+  disposers.push(
+    effect(() => {
+      if (copyNinjaPaused.value) cancelPendingCopies()
+    })
+  )
+
   disposers.push(
     onDanmakuSent(sent => {
       if (sent.source === 'copy' || copyNinjaEffectiveRole.value !== 'master') return

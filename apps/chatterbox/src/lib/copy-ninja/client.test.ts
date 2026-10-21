@@ -22,6 +22,7 @@ interface Harness {
   settings: typeof import('./settings')
   store: { cachedRoomId: { value: number | null } }
   sendQueue: { sent: (SentItem & { priority: number })[]; emitSent(item: SentItem): void }
+  emoteCache: { loaded: boolean }
   llm: {
     gap: string | null
     calls: { feature: string; text: string; signal?: AbortSignal }[]
@@ -46,6 +47,7 @@ async function loadClient(uid: string, gm: Record<string, unknown>): Promise<Har
       export * as settings from './settings'
       export * as store from '../store'
       export * as sendQueue from '../send-queue'
+      export { emoteCache } from '../emoticon'
       export { llm } from '../llm-tasks'
       export { lines as logs } from '../log'
     `,
@@ -84,10 +86,13 @@ async function loadClient(uid: string, gm: Record<string, unknown>): Promise<Har
       }
     `,
     [join(LIB, 'emoticon.ts')]: `
-      // The mirror's cache only has official_111: any other ID-shaped text is unavailable to this account.
-      export const isEmoticonUnique = text => text === 'official_111'
+      // Once loaded, the mirror's cache only has official_111: other ID-shaped text is unavailable to this account.
+      export const emoteCache = { loaded: true }
+      export const looksLikeEmoticonUnique = text => /^[a-z]+(_\\d+)+$/.test(text)
+      export const isEmoticonUnique = text => emoteCache.loaded && text === 'official_111'
       export const isLockedEmoticon = () => false
-      export const isUnavailableEmoticon = text => /^[a-z]+(_\\d+)+$/.test(text) && text !== 'official_111'
+      export const isUnavailableEmoticon = text =>
+        emoteCache.loaded && looksLikeEmoticonUnique(text) && !isEmoticonUnique(text)
     `,
     [join(LIB, 'llm-tasks.ts')]: `
       export const llm = { gap: null, calls: [], rewrite: async text => '改写：' + text }
@@ -137,6 +142,11 @@ async function loadClient(uid: string, gm: Record<string, unknown>): Promise<Har
   )
   clients.push(harness)
   return harness
+}
+
+/** An LLM rewrite that only settles when its signal aborts. */
+function hangUntilAborted(_text: string, signal?: AbortSignal): Promise<string> {
+  return new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal.reason)))
 }
 
 async function until(check: () => boolean, label: string): Promise<void> {
@@ -311,12 +321,16 @@ test('感知忍術 never falls back to the master text', async () => {
   expect(mirror.sendQueue.sent).toHaveLength(0)
 })
 
-test('感知忍術 copies emotes verbatim', async () => {
-  const { master, mirror, resultFor } = await setup()
+test('感知忍術 copies emotes verbatim, even before the emote list loads or with the LLM unset', async () => {
+  const { master, mirror } = await setup()
   mirror.settings.copyNinjaKanchi.value = true
+  mirror.llm.gap = '请先在「设置 → LLM 设置」中添加服务商'
   master.sendQueue.emitSent({ message: 'official_111', roomId: ROOM, source: 'emote' })
-  await until(() => resultFor('2')?.status === 'sent', 'the emote copy')
-  expect(mirror.sendQueue.sent.map(item => item.message)).toEqual(['official_111'])
+  await until(() => mirror.sendQueue.sent.length === 1, 'the emote copy')
+  mirror.emoteCache.loaded = false
+  master.sendQueue.emitSent({ message: 'official_222', roomId: ROOM, source: 'emote' })
+  await until(() => mirror.sendQueue.sent.length === 2, 'the emote copy before the list loads')
+  expect(mirror.sendQueue.sent.map(item => item.message)).toEqual(['official_111', 'official_222'])
   expect(mirror.llm.calls).toHaveLength(0)
 })
 
@@ -337,15 +351,47 @@ test('感知忍術 rewrites overlap but copies keep the master order', async () 
   expect(mirror.sendQueue.sent.map(item => item.message)).toEqual(['改写：第一段', '改写：第二段', '改写：第三段'])
 })
 
-test('stopping aborts rewrites still in flight', async () => {
-  const { master, mirror } = await setup()
+test('a copy whose tab changed rooms aborts its rewrite', async () => {
+  const { master, mirror, resultFor } = await setup()
   mirror.settings.copyNinjaKanchi.value = true
-  mirror.llm.rewrite = (_text, signal) =>
-    new Promise<string>((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal.reason)))
+  mirror.settings.copyNinjaDelayMinSec.value = 0.3
+  mirror.settings.copyNinjaDelayMaxSec.value = 0.3
+  mirror.llm.rewrite = hangUntilAborted
   master.sendQueue.emitSent({ message: '晚上好', roomId: ROOM, source: 'manual' })
   await until(() => mirror.llm.calls.length === 1, 'the rewrite to start')
-  mirror.stopCopyNinja()
+  mirror.store.cachedRoomId.value = OTHER_ROOM
+  await until(() => resultFor('2')?.detail === '不在同一直播间', 'the room skip')
   expect(mirror.llm.calls[0]?.signal?.aborted).toBe(true)
+})
+
+test('a rewrite that lands after its tab changed rooms is not posted', async () => {
+  const { master, mirror, resultFor } = await setup()
+  mirror.settings.copyNinjaKanchi.value = true
+  const reply = Promise.withResolvers<string>()
+  mirror.llm.rewrite = () => reply.promise
+  master.sendQueue.emitSent({ message: '晚上好', roomId: ROOM, source: 'manual' })
+  await until(() => mirror.llm.calls.length === 1, 'the rewrite to start')
+  mirror.store.cachedRoomId.value = OTHER_ROOM
+  reply.resolve('晚上好呀')
+  await until(() => resultFor('2')?.status === 'skipped', 'the cancelled copy')
+  expect(resultFor('2')?.detail).toBe('已取消')
+  expect(mirror.sendQueue.sent).toHaveLength(0)
+})
+
+test('a pause from another tab, or stopping, aborts rewrites still in flight', async () => {
+  const { master, mirror } = await setup()
+  mirror.settings.copyNinjaKanchi.value = true
+  mirror.llm.rewrite = hangUntilAborted
+  master.sendQueue.emitSent({ message: '晚上好', roomId: ROOM, source: 'manual' })
+  await until(() => mirror.llm.calls.length === 1, 'the first rewrite to start')
+  mirror.settings.copyNinjaPaused.value = true
+  expect(mirror.llm.calls[0]?.signal?.aborted).toBe(true)
+
+  mirror.settings.copyNinjaPaused.value = false
+  master.sendQueue.emitSent({ message: '晚上好', roomId: ROOM, source: 'manual' })
+  await until(() => mirror.llm.calls.length === 2, 'the second rewrite to start')
+  mirror.stopCopyNinja()
+  expect(mirror.llm.calls[1]?.signal?.aborted).toBe(true)
   await Bun.sleep(50)
   expect(mirror.sendQueue.sent).toHaveLength(0)
 })

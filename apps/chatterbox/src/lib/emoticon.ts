@@ -39,12 +39,17 @@ export function formatLockedEmoticonReject(msg: string, label: string): string {
 // false-match cost is a log instead of a send, and ID-shaped chat text is rare.
 const EMOTICON_UNIQUE_PATTERN = /^[a-z]+(_\d+)+$/
 
+/** `true` when `msg` is shaped like an `emoticon_unique` ID, whether or not the cache has loaded. */
+export function looksLikeEmoticonUnique(msg: string): boolean {
+  return EMOTICON_UNIQUE_PATTERN.test(msg)
+}
+
 /**
  * `true` when `msg` is ID-shaped but not in the room's cache — B站 echoes such a raw ID
  * as plain text instead of the emote. Empty cache → `false` (can't tell unavailable from still-loading).
  */
 export function isUnavailableEmoticon(msg: string): boolean {
-  if (!EMOTICON_UNIQUE_PATTERN.test(msg)) return false
+  if (!looksLikeEmoticonUnique(msg)) return false
   if (cachedEmoticonPackages.value.length === 0) return false
   return !isEmoticonUnique(msg)
 }

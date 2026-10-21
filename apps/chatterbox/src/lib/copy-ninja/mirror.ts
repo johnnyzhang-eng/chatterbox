@@ -1,7 +1,7 @@
 import type { ActionDeliveryMessage, CopyStatus } from '@laplace.live/kakashi-protocol'
 
 import { getCsrfToken } from '../api'
-import { isEmoticonUnique, isLockedEmoticon, isUnavailableEmoticon } from '../emoticon'
+import { isEmoticonUnique, isLockedEmoticon, isUnavailableEmoticon, looksLikeEmoticonUnique } from '../emoticon'
 import { describeLlmGap, polishWithLlm } from '../llm-tasks'
 import { appendLog } from '../log'
 import { applyReplacements } from '../replacement'
@@ -26,12 +26,18 @@ export type ReportResult = (eventId: string, status: CopyStatus, detail?: string
 /** 感知忍術 outcome: the text to send instead of the master's, or why nothing is sent. */
 type Rewrite = { ok: true; text: string } | { ok: false; status: 'failed' | 'skipped'; detail: string }
 
+interface Rewriting {
+  result: Promise<Rewrite>
+  /** Aborted once the copy is done with it, so an early exit stops paying for the call. */
+  controller: AbortController
+}
+
 interface PendingCopy {
   msg: ActionDeliveryMessage
   plannedAt: number
   report: ReportResult
   /** Started on arrival so the LLM call overlaps the delay. */
-  rewrite: Promise<Rewrite> | null
+  rewrite: Rewriting | null
 }
 
 /** A copy still unsent this long after its planned time (throttled background tab, long queue) is dropped as stale. */
@@ -82,8 +88,8 @@ export function handleMirrorAction(msg: ActionDeliveryMessage, report: ReportRes
     report(eventId, 'skipped', '待发送队列已满')
     return
   }
-  // Emote IDs are opaque: a rewrite would post one as plain text.
-  const kanchi = copyNinjaKanchi.value && !isEmoticonUnique(action.text) && !isUnavailableEmoticon(action.text)
+  // Emote IDs are opaque, cached or not: a rewrite would post one as plain text.
+  const kanchi = copyNinjaKanchi.value && !isEmoticonUnique(action.text) && !looksLikeEmoticonUnique(action.text)
   const gap = kanchi ? describeLlmGap('kanchi') : null
   if (gap) {
     appendLog(`⚠️ 跟随·${SOURCE_LABELS[action.source]}：感知忍術未就绪，${gap}`)
@@ -98,9 +104,11 @@ export function handleMirrorAction(msg: ActionDeliveryMessage, report: ReportRes
 }
 
 /** Rewrite `text` with the 感知忍術 prompt; gives up at `deadline`, when the copy would be stale anyway. */
-function startRewrite(text: string, deadline: number): Promise<Rewrite> {
+function startRewrite(text: string, deadline: number): Rewriting {
+  const controller = new AbortController()
   const timeout = AbortSignal.timeout(Math.max(0, deadline - Date.now()))
-  return polishWithLlm('kanchi', text, { signal: AbortSignal.any([rewriteAbort.signal, timeout]) }).then(
+  const signal = AbortSignal.any([rewriteAbort.signal, controller.signal, timeout])
+  const result = polishWithLlm('kanchi', text, { signal }).then(
     (rewritten): Rewrite => {
       // The master's replacements were applied to its text, not to this fresh one.
       const replaced = applyReplacements(rewritten)
@@ -113,6 +121,7 @@ function startRewrite(text: string, deadline: number): Promise<Rewrite> {
         ? { ok: false, status: 'skipped', detail: '感知忍術超时' }
         : { ok: false, status: 'failed', detail: `感知忍術：${err instanceof Error ? err.message : String(err)}` }
   )
+  return { result, controller }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -137,6 +146,8 @@ async function drain(): Promise<void> {
         await copyAction(next, generation)
       } catch (err) {
         console.error('[LAPLACE Chatterbox] Copy Ninja copy failed:', err)
+      } finally {
+        next.rewrite?.controller.abort()
       }
     }
   } finally {
@@ -160,17 +171,22 @@ async function copyAction({ msg: { eventId, action }, plannedAt, report, rewrite
   const label = `跟随·${SOURCE_LABELS[action.source]}`
   let text = action.text
   if (rewrite) {
-    const rewritten = await rewrite
+    const rewritten = await rewrite.result
     if (gen !== generation) return
     if (!rewritten.ok) {
-      appendLog(`⚠️ ${label}：${rewritten.detail}，已跳过 ${action.text}`)
+      appendLog(`⚠️ ${label}：${rewritten.detail}，未发送 ${action.text}`)
       return report(eventId, rewritten.status, rewritten.detail)
     }
     text = rewritten.text
     appendLog(`✨ ${label} 感知忍術：${action.text} → ${text}`)
   }
   const segments = isEmoticonUnique(text) ? [text] : processMessages(text, maxLength.value)
-  const stillWanted = () => gen === generation && !copyNinjaPaused.value && Date.now() - plannedAt <= STALE_MS
+  // Re-checks the room: the tab may have moved during the rewrite or the queue wait.
+  const stillWanted = () =>
+    gen === generation &&
+    !copyNinjaPaused.value &&
+    Date.now() - plannedAt <= STALE_MS &&
+    cachedRoomId.value === action.roomId
   for (const segment of segments) {
     const result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.COPY, 'copy', stillWanted)
     if (result.cancelled) return report(eventId, 'skipped', '已取消')
