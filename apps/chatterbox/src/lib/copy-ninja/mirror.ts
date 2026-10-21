@@ -2,7 +2,9 @@ import type { ActionDeliveryMessage, CopyStatus } from '@laplace.live/kakashi-pr
 
 import { getCsrfToken } from '../api'
 import { isEmoticonUnique, isLockedEmoticon, isUnavailableEmoticon } from '../emoticon'
+import { describeLlmGap, polishWithLlm } from '../llm-tasks'
 import { appendLog } from '../log'
+import { applyReplacements } from '../replacement'
 import { enqueueDanmaku, SendPriority } from '../send-queue'
 import { cachedRoomId, maxLength } from '../store'
 import { formatDanmakuError, processMessages } from '../utils'
@@ -12,6 +14,7 @@ import {
   copyNinjaDelayMinSec,
   copyNinjaDropPercent,
   copyNinjaFollowRoom,
+  copyNinjaKanchi,
   copyNinjaMasterRoomId,
   copyNinjaPaused,
   isCopySourceEnabled,
@@ -20,10 +23,15 @@ import {
 
 export type ReportResult = (eventId: string, status: CopyStatus, detail?: string) => void
 
+/** 感知忍術 outcome: the text to send instead of the master's, or why nothing is sent. */
+type Rewrite = { ok: true; text: string } | { ok: false; status: 'failed' | 'skipped'; detail: string }
+
 interface PendingCopy {
   msg: ActionDeliveryMessage
   plannedAt: number
   report: ReportResult
+  /** Started on arrival so the LLM call overlaps the delay. */
+  rewrite: Promise<Rewrite> | null
 }
 
 /** A copy still unsent this long after its planned time (throttled background tab, long queue) is dropped as stale. */
@@ -39,6 +47,8 @@ let draining = false
 let lastPlannedAt = 0
 /** Bumped by {@link cancelPendingCopies}; a copy from an older generation never posts, even from the send queue. */
 let generation = 0
+/** Replaced by {@link cancelPendingCopies}, aborting the old generation's rewrites. */
+let rewriteAbort = new AbortController()
 let wakeDrain: (() => void) | null = null
 let drainTimer: ReturnType<typeof setTimeout> | null = null
 let consecutiveFailures = 0
@@ -72,10 +82,37 @@ export function handleMirrorAction(msg: ActionDeliveryMessage, report: ReportRes
     report(eventId, 'skipped', '待发送队列已满')
     return
   }
+  // Emote IDs are opaque: a rewrite would post one as plain text.
+  const kanchi = copyNinjaKanchi.value && !isEmoticonUnique(action.text) && !isUnavailableEmoticon(action.text)
+  const gap = kanchi ? describeLlmGap('kanchi') : null
+  if (gap) {
+    appendLog(`⚠️ 跟随·${SOURCE_LABELS[action.source]}：感知忍術未就绪，${gap}`)
+    report(eventId, 'failed', `感知忍術：${gap}`)
+    return
+  }
   // Never earlier than the copy before it, so random delays can't reorder copies.
   lastPlannedAt = Math.max(Date.now() + plan.delayMs, lastPlannedAt)
-  pending.push({ msg, plannedAt: lastPlannedAt, report })
+  const rewrite = kanchi ? startRewrite(action.text, lastPlannedAt + STALE_MS) : null
+  pending.push({ msg, plannedAt: lastPlannedAt, report, rewrite })
   void drain()
+}
+
+/** Rewrite `text` with the 感知忍術 prompt; gives up at `deadline`, when the copy would be stale anyway. */
+function startRewrite(text: string, deadline: number): Promise<Rewrite> {
+  const timeout = AbortSignal.timeout(Math.max(0, deadline - Date.now()))
+  return polishWithLlm('kanchi', text, { signal: AbortSignal.any([rewriteAbort.signal, timeout]) }).then(
+    (rewritten): Rewrite => {
+      // The master's replacements were applied to its text, not to this fresh one.
+      const replaced = applyReplacements(rewritten)
+      return replaced.trim()
+        ? { ok: true, text: replaced }
+        : { ok: false, status: 'skipped', detail: '感知忍術返回为空' }
+    },
+    (err: unknown): Rewrite =>
+      timeout.aborted
+        ? { ok: false, status: 'skipped', detail: '感知忍術超时' }
+        : { ok: false, status: 'failed', detail: `感知忍術：${err instanceof Error ? err.message : String(err)}` }
+  )
 }
 
 function sleep(ms: number): Promise<void> {
@@ -107,7 +144,7 @@ async function drain(): Promise<void> {
   }
 }
 
-async function copyAction({ msg: { eventId, action }, plannedAt, report }: PendingCopy, gen: number) {
+async function copyAction({ msg: { eventId, action }, plannedAt, report, rewrite }: PendingCopy, gen: number) {
   if (gen !== generation) return
   if (copyNinjaPaused.value) return report(eventId, 'skipped', '分身已暂停')
   if (Date.now() - plannedAt > STALE_MS) return report(eventId, 'skipped', '已过期')
@@ -120,9 +157,20 @@ async function copyAction({ msg: { eventId, action }, plannedAt, report }: Pendi
   if (isUnavailableEmoticon(action.text) || isLockedEmoticon(action.text)) {
     return report(eventId, 'skipped', '该账号无法使用此表情')
   }
-  const segments = isEmoticonUnique(action.text) ? [action.text] : processMessages(action.text, maxLength.value)
-  const stillWanted = () => gen === generation && !copyNinjaPaused.value && Date.now() - plannedAt <= STALE_MS
   const label = `跟随·${SOURCE_LABELS[action.source]}`
+  let text = action.text
+  if (rewrite) {
+    const rewritten = await rewrite
+    if (gen !== generation) return
+    if (!rewritten.ok) {
+      appendLog(`⚠️ ${label}：${rewritten.detail}，已跳过 ${action.text}`)
+      return report(eventId, rewritten.status, rewritten.detail)
+    }
+    text = rewritten.text
+    appendLog(`✨ ${label} 感知忍術：${action.text} → ${text}`)
+  }
+  const segments = isEmoticonUnique(text) ? [text] : processMessages(text, maxLength.value)
+  const stillWanted = () => gen === generation && !copyNinjaPaused.value && Date.now() - plannedAt <= STALE_MS
   for (const segment of segments) {
     const result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.COPY, 'copy', stillWanted)
     if (result.cancelled) return report(eventId, 'skipped', '已取消')
@@ -133,7 +181,7 @@ async function copyAction({ msg: { eventId, action }, plannedAt, report }: Pendi
     }
   }
   consecutiveFailures = 0
-  report(eventId, 'sent')
+  report(eventId, 'sent', rewrite ? `感知忍術：${text}` : undefined)
 }
 
 function recordFailure(): void {
@@ -153,6 +201,8 @@ export function resumeMirror(): void {
 /** Drop queued and in-queue copies (disconnect, stop, pause). */
 export function cancelPendingCopies(): void {
   generation++
+  rewriteAbort.abort()
+  rewriteAbort = new AbortController()
   pending.length = 0
   lastPlannedAt = 0
   if (drainTimer) clearTimeout(drainTimer)

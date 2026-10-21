@@ -12,6 +12,7 @@ import {
   copyNinjaEffectiveRole,
   copyNinjaEnabled,
   copyNinjaFollowRoom,
+  copyNinjaKanchi,
   copyNinjaPaused,
   copyNinjaResults,
   copyNinjaRoles,
@@ -26,7 +27,9 @@ import {
   isCopySourceEnabled,
   SOURCE_LABELS,
 } from '../lib/copy-ninja/settings'
-import { aiChatEnabled, autoBlendEnabled, sendMsg } from '../lib/store'
+import { describeLlmGap, isLlmApiConfigured } from '../lib/llm-tasks'
+import { aiChatEnabled, autoBlendEnabled, llmActivePromptKanchi, llmPromptsKanchi, sendMsg } from '../lib/store'
+import { PromptPicker } from './prompt-picker'
 import { Button } from './ui/button'
 import { Checkbox } from './ui/checkbox'
 import { Input } from './ui/input'
@@ -91,6 +94,8 @@ function MirrorSettings() {
     autoBlendEnabled.value && '自动融入',
     aiChatEnabled.value && 'AI 融入',
   ].filter(Boolean)
+  const kanchiGap = copyNinjaKanchi.value ? describeLlmGap('kanchi') : null
+  const showPromptPicker = isLlmApiConfigured() && llmPromptsKanchi.value.length > 0
 
   return (
     <div class={SECTION_CLASS}>
@@ -144,6 +149,29 @@ function MirrorSettings() {
         />
         <span>秒</span>
       </div>
+      <div class={ROW_CLASS}>
+        <Checkbox
+          id='copyNinjaKanchi'
+          checked={copyNinjaKanchi.value}
+          onInput={e => {
+            copyNinjaKanchi.value = e.currentTarget.checked
+          }}
+          label='感知忍術（经 LLM 改写后再跟随）'
+        />
+        {showPromptPicker && (
+          <PromptPicker
+            className='min-w-10 truncate'
+            title='切换感知忍術使用的提示词'
+            prompts={llmPromptsKanchi.value}
+            activeIndex={llmActivePromptKanchi.value}
+            onActiveIndexChange={v => {
+              llmActivePromptKanchi.value = v
+            }}
+            previewGraphemes={16}
+          />
+        )}
+      </div>
+      {kanchiGap && <div class='mb-2 text-[red]'>{kanchiGap}</div>}
       <Checkbox
         id='copyNinjaFollowRoom'
         checked={copyNinjaFollowRoom.value}

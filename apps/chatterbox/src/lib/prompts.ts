@@ -8,17 +8,19 @@ import {
   llmActivePromptAutoBlend,
   llmActivePromptAutoSend,
   llmActivePromptGlobal,
+  llmActivePromptKanchi,
   llmActivePromptNormalSend,
   llmPromptsAiChat,
   llmPromptsAutoBlend,
   llmPromptsAutoSend,
   llmPromptsGlobal,
+  llmPromptsKanchi,
   llmPromptsNormalSend,
 } from './store'
 import { getGraphemes, trimText } from './utils'
 
 /** Features that own their own prompt list; casing mirrors the signals. */
-export type LlmPromptFeature = 'normalSend' | 'autoBlend' | 'autoSend' | 'aiChat'
+export type LlmPromptFeature = 'normalSend' | 'autoBlend' | 'autoSend' | 'aiChat' | 'kanchi'
 
 /** Default preview cap in graphemes; inline pickers pass a smaller value. */
 const DEFAULT_PROMPT_PREVIEW_GRAPHEMES = 24
@@ -46,6 +48,17 @@ export const DEFAULT_GLOBAL_PROMPT = [
   '- 使用自然口语化的中文，单条弹幕必须在 40 字以内，但不要凑字数',
   '- 不要使用 Markdown、列表、不要包裹引号或代码块',
   '- 直接输出最终弹幕文本，不要包含解释、前缀或多余空白，结尾不带句号',
+].join('\n')
+
+/** Shipped default 感知忍術 prompt; a new key seeds once via the gmSignal default, so deleting it sticks. */
+export const DEFAULT_KANCHI_PROMPT = [
+  '换个说法（默认）',
+  '',
+  '输入是同一直播间里另一位观众刚发出的弹幕。请像另一位观众那样，用自己的话发一条表达同样意思的弹幕：',
+  '',
+  '- 保留原文的意思、情绪和梗，但换一种说法，不要照抄原文',
+  '- 长度与原文相近，原文很短时也要保持简短',
+  '- 原文是口号、复读或刷屏内容时，换成常见的同类说法即可',
 ].join('\n')
 
 /**
@@ -170,6 +183,8 @@ export function getActiveFeaturePrompt(feature: LlmPromptFeature): string {
       return llmPromptsAutoSend.value[llmActivePromptAutoSend.value] ?? ''
     case 'aiChat':
       return llmPromptsAiChat.value[llmActivePromptAiChat.value] ?? ''
+    case 'kanchi':
+      return llmPromptsKanchi.value[llmActivePromptKanchi.value] ?? ''
   }
 }
 

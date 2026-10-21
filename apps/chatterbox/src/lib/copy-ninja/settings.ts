@@ -31,6 +31,8 @@ export const copyNinjaDropPercent = gmSignal('copyNinjaDropPercent', 0, SYNC)
 export const copyNinjaDelayMinSec = gmSignal('copyNinjaDelayMinSec', 1, SYNC)
 export const copyNinjaDelayMaxSec = gmSignal('copyNinjaDelayMaxSec', 4, SYNC)
 export const copyNinjaFollowRoom = gmSignal('copyNinjaFollowRoom', false, SYNC)
+/** 感知忍術: rewrite each master action through the LLM (`kanchi` prompt) instead of copying it verbatim. */
+export const copyNinjaKanchi = gmSignal('copyNinjaKanchi', false, SYNC)
 /** Set after repeated copy failures (mute / risk control); persisted so a reload or room follow can't resume copying. */
 export const copyNinjaPaused = gmSignal('copyNinjaPaused', false, SYNC)
 

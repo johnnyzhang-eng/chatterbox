@@ -15,13 +15,18 @@ interface SentItem {
   source: string
 }
 
-/** Real client/mirror/settings modules; Bilibili, GM storage and the send queue are stubbed per account. */
+/** Real client/mirror/settings modules; Bilibili, GM storage, the send queue and the LLM are stubbed per account. */
 interface Harness {
   startCopyNinja(): void
   stopCopyNinja(): void
   settings: typeof import('./settings')
   store: { cachedRoomId: { value: number | null } }
   sendQueue: { sent: (SentItem & { priority: number })[]; emitSent(item: SentItem): void }
+  llm: {
+    gap: string | null
+    calls: { feature: string; text: string; signal?: AbortSignal }[]
+    rewrite: (text: string, signal?: AbortSignal) => Promise<string>
+  }
   logs: string[]
 }
 
@@ -41,6 +46,7 @@ async function loadClient(uid: string, gm: Record<string, unknown>): Promise<Har
       export * as settings from './settings'
       export * as store from '../store'
       export * as sendQueue from '../send-queue'
+      export { llm } from '../llm-tasks'
       export { lines as logs } from '../log'
     `,
     [join(LIB, 'api.ts')]: `
@@ -78,10 +84,21 @@ async function loadClient(uid: string, gm: Record<string, unknown>): Promise<Har
       }
     `,
     [join(LIB, 'emoticon.ts')]: `
-      // As if the mirror's cache lacks every emote: ID-shaped text is unavailable to this account.
-      export const isEmoticonUnique = () => false
+      // The mirror's cache only has official_111: any other ID-shaped text is unavailable to this account.
+      export const isEmoticonUnique = text => text === 'official_111'
       export const isLockedEmoticon = () => false
-      export const isUnavailableEmoticon = text => /^[a-z]+(_\\d+)+$/.test(text)
+      export const isUnavailableEmoticon = text => /^[a-z]+(_\\d+)+$/.test(text) && text !== 'official_111'
+    `,
+    [join(LIB, 'llm-tasks.ts')]: `
+      export const llm = { gap: null, calls: [], rewrite: async text => '改写：' + text }
+      export const describeLlmGap = () => llm.gap
+      export function polishWithLlm(feature, text, opts) {
+        llm.calls.push({ feature, text, signal: opts?.signal })
+        return llm.rewrite(text, opts?.signal)
+      }
+    `,
+    [join(LIB, 'replacement.ts')]: `
+      export const applyReplacements = text => text.replaceAll('禁', '*')
     `,
   }
   const gmStub: BunPlugin = {
@@ -255,4 +272,80 @@ test('turning following on after connecting schedules the move to the master roo
   expect(mirror.logs.some(line => line.includes('秒后跟随'))).toBe(false)
   mirror.settings.copyNinjaFollowRoom.value = true
   await until(() => mirror.logs.some(line => line.includes(`主控在直播间 ${ROOM}`)), 'the scheduled follow')
+})
+
+test('感知忍術 sends the LLM rewrite, with replacements applied, instead of the master text', async () => {
+  const { master, mirror, resultFor } = await setup()
+  master.sendQueue.emitSent({ message: '禁止摸鱼', roomId: ROOM, source: 'manual' })
+  await until(() => resultFor('2')?.status === 'sent', 'the verbatim copy')
+  expect(resultFor('2')?.detail).toBeUndefined()
+
+  mirror.settings.copyNinjaKanchi.value = true
+  master.sendQueue.emitSent({ message: '禁止摸鱼', roomId: ROOM, source: 'manual' })
+  await until(() => resultFor('2')?.detail !== undefined, 'the rewritten copy')
+  expect(resultFor('2')).toEqual({ status: 'sent', detail: '感知忍術：改写：*止摸鱼' })
+  expect(mirror.llm.calls.map(call => [call.feature, call.text])).toEqual([['kanchi', '禁止摸鱼']])
+  expect(mirror.sendQueue.sent.map(item => item.message)).toEqual(['禁止摸鱼', '改写：*止摸鱼'])
+})
+
+test('感知忍術 never falls back to the master text', async () => {
+  const { master, mirror, resultFor } = await setup()
+  mirror.settings.copyNinjaKanchi.value = true
+  mirror.llm.rewrite = async () => {
+    throw new Error('HTTP 401')
+  }
+  master.sendQueue.emitSent({ message: '晚上好', roomId: ROOM, source: 'manual' })
+  await until(() => resultFor('2')?.detail === '感知忍術：HTTP 401', 'the rewrite failure')
+  expect(resultFor('2')?.status).toBe('failed')
+
+  mirror.llm.rewrite = async () => ''
+  master.sendQueue.emitSent({ message: '晚上好', roomId: ROOM, source: 'manual' })
+  await until(() => resultFor('2')?.detail === '感知忍術返回为空', 'the empty rewrite')
+  expect(resultFor('2')?.status).toBe('skipped')
+
+  mirror.llm.gap = '请先在「设置 → LLM 设置」中填写 API Key'
+  master.sendQueue.emitSent({ message: '晚上好', roomId: ROOM, source: 'manual' })
+  await until(() => resultFor('2')?.detail === `感知忍術：${mirror.llm.gap}`, 'the config gap')
+  expect(resultFor('2')?.status).toBe('failed')
+  expect(mirror.llm.calls).toHaveLength(2)
+  expect(mirror.sendQueue.sent).toHaveLength(0)
+})
+
+test('感知忍術 copies emotes verbatim', async () => {
+  const { master, mirror, resultFor } = await setup()
+  mirror.settings.copyNinjaKanchi.value = true
+  master.sendQueue.emitSent({ message: 'official_111', roomId: ROOM, source: 'emote' })
+  await until(() => resultFor('2')?.status === 'sent', 'the emote copy')
+  expect(mirror.sendQueue.sent.map(item => item.message)).toEqual(['official_111'])
+  expect(mirror.llm.calls).toHaveLength(0)
+})
+
+test('感知忍術 rewrites overlap but copies keep the master order', async () => {
+  const { master, mirror } = await setup()
+  mirror.settings.copyNinjaKanchi.value = true
+  const latencyMs: Record<string, number> = { 第一段: 500, 第二段: 250, 第三段: 0 }
+  mirror.llm.rewrite = async text => {
+    await Bun.sleep(latencyMs[text] ?? 0)
+    return `改写：${text}`
+  }
+  for (const message of ['第一段', '第二段', '第三段']) {
+    master.sendQueue.emitSent({ message, roomId: ROOM, source: 'manual' })
+  }
+  await until(() => mirror.llm.calls.length === 3, 'all three rewrites to start')
+  expect(mirror.sendQueue.sent).toHaveLength(0)
+  await until(() => mirror.sendQueue.sent.length === 3, 'all three copies')
+  expect(mirror.sendQueue.sent.map(item => item.message)).toEqual(['改写：第一段', '改写：第二段', '改写：第三段'])
+})
+
+test('stopping aborts rewrites still in flight', async () => {
+  const { master, mirror } = await setup()
+  mirror.settings.copyNinjaKanchi.value = true
+  mirror.llm.rewrite = (_text, signal) =>
+    new Promise<string>((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal.reason)))
+  master.sendQueue.emitSent({ message: '晚上好', roomId: ROOM, source: 'manual' })
+  await until(() => mirror.llm.calls.length === 1, 'the rewrite to start')
+  mirror.stopCopyNinja()
+  expect(mirror.llm.calls[0]?.signal?.aborted).toBe(true)
+  await Bun.sleep(50)
+  expect(mirror.sendQueue.sent).toHaveLength(0)
 })
