@@ -121,6 +121,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact_name }}
+          if-no-files-found: error
           path: apps/kakashi-server/dist/kakashi-server-*
 
   build-windows:
@@ -157,6 +158,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: windows-binaries
+          if-no-files-found: error
           path: apps/kakashi-server/dist/kakashi-server-windows-x64.exe
 
   # The only job with write access: builds (which run PR code) stay read-only.
@@ -184,9 +186,11 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           sh .github/scripts/changelog-section.sh apps/kakashi-server/CHANGELOG.md "${TAG##*@}" > notes.md
-          if [ ! -s notes.md ]; then
-            echo "::error::No CHANGELOG entry for $TAG"
-            exit 1
-          fi
-          # With assets, gh creates a draft, uploads them, then publishes.
-          gh release create "$TAG" dist/kakashi-server-* --verify-tag --title "$TAG" --notes-file notes.md
+          # An immutable release can't take a binary later, so refuse to publish without all of them.
+          for binary in darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64.exe; do
+            if [ ! -s "dist/kakashi-server-$binary" ]; then
+              echo "::error::Missing kakashi-server-$binary"
+              exit 1
+            fi
+          done
+          sh .github/scripts/publish-release.sh "$TAG" notes.md dist/kakashi-server-*
