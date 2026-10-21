@@ -3,6 +3,10 @@ name: Build Server Binaries
 on:
   push:
     branches: [master]
+    # Pushed by release.yml (changesets) with the release bot's token, so this
+    # trigger fires; path filters are not evaluated for tag pushes. If a run is
+    # ever missed, dispatch this workflow on the tag to publish the release.
+    tags: ['@laplace.live/kakashi-server@*']
     paths:
       - apps/kakashi-server/**
       - packages/kakashi-protocol/**
@@ -17,8 +21,6 @@ on:
       - package.json
       - bun.lock
       - .github/workflows/build-server.yml
-  release:
-    types: [created]
   workflow_dispatch:
 
 permissions:
@@ -26,9 +28,6 @@ permissions:
 
 jobs:
   build-unix:
-    # Changesets creates a Release for every versioned package; only the
-    # server's Releases get binaries.
-    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, '@laplace.live/kakashi-server@')
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -51,7 +50,7 @@ jobs:
         run: bun run --cwd apps/kakashi-server build ${{ matrix.targets }}
 
       - name: Import Apple Certificate
-        if: matrix.os == 'macos-latest' && github.event_name == 'release'
+        if: matrix.os == 'macos-latest' && startsWith(github.ref, 'refs/tags/@laplace.live/kakashi-server@')
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -87,7 +86,7 @@ jobs:
           rm $RUNNER_TEMP/certificate.p12
 
       - name: Prepare Apple API Key
-        if: matrix.os == 'macos-latest' && github.event_name == 'release'
+        if: matrix.os == 'macos-latest' && startsWith(github.ref, 'refs/tags/@laplace.live/kakashi-server@')
         env:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         run: |
@@ -95,7 +94,7 @@ jobs:
           echo "$APPLE_API_KEY" > ~/private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
 
       - name: Sign and notarize macOS binaries
-        if: matrix.os == 'macos-latest' && github.event_name == 'release'
+        if: matrix.os == 'macos-latest' && startsWith(github.ref, 'refs/tags/@laplace.live/kakashi-server@')
         working-directory: apps/kakashi-server
         env:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
@@ -125,8 +124,6 @@ jobs:
           path: apps/kakashi-server/dist/kakashi-server-*
 
   build-windows:
-    # Same filter as build-unix.
-    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, '@laplace.live/kakashi-server@')
     runs-on: windows-latest
 
     steps:
@@ -141,7 +138,7 @@ jobs:
         run: bun run --cwd apps/kakashi-server build --target bun-windows-x64
 
       - name: Sign Windows binary with Trusted Signing
-        if: github.event_name == 'release'
+        if: startsWith(github.ref, 'refs/tags/@laplace.live/kakashi-server@')
         uses: azure/artifact-signing-action@v2
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -163,25 +160,33 @@ jobs:
           path: apps/kakashi-server/dist/kakashi-server-windows-x64.exe
 
   # The only job with write access: builds (which run PR code) stay read-only.
-  release-assets:
+  # Releases are immutable once published, so this publishes the server's
+  # release with every binary attached at once.
+  github-release:
     needs: [build-unix, build-windows]
-    if: github.event_name == 'release' && startsWith(github.event.release.tag_name, '@laplace.live/kakashi-server@')
+    if: startsWith(github.ref, 'refs/tags/@laplace.live/kakashi-server@')
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           pattern: '*-binaries'
           path: dist
           merge-multiple: true
 
-      - name: Upload to GitHub release
-        uses: svenstaro/upload-release-action@v2
-        with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: dist/kakashi-server-*
-          file_glob: true
-          tag: ${{ github.ref }}
-          overwrite: true
+      - name: Publish the release with its binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          sh .github/scripts/changelog-section.sh apps/kakashi-server/CHANGELOG.md "${TAG##*@}" > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::No CHANGELOG entry for $TAG"
+            exit 1
+          fi
+          # With assets, gh creates a draft, uploads them, then publishes.
+          gh release create "$TAG" dist/kakashi-server-* --verify-tag --title "$TAG" --notes-file notes.md

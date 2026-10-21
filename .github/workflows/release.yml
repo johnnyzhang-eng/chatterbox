@@ -55,16 +55,47 @@ jobs:
         uses: changesets/action@v2
         with:
           # Every package is private: `changeset publish` only tags the new
-          # versions (`privatePackages.tag`), and the action pushes the tags
-          # and creates a GitHub Release per tag from its CHANGELOG entry.
+          # versions (`privatePackages.tag`), and the action pushes the tags.
           publish-script: bun run release
           version-script: bun run version
           commit-message: "Version Packages [skip ci]"
-          # The @laplace.live/kakashi-server Release fires build-server.yml's
-          # `release: created` trigger, which builds, signs and uploads the
-          # binaries. v2 reads the token only from this input, not from the
+          # Releases are immutable once published, so nothing can be attached
+          # afterwards: the action only pushes tags, and each release is
+          # published whole, by github-releases below or, with its binaries,
+          # by build-server.yml, which the pushed server tag fires.
+          create-github-releases: false
+          # v2 reads the token only from this input, not from the
           # `GITHUB_TOKEN` env var.
           github-token: ${{ steps.app-token.outputs.token }}
+
+  github-releases:
+    needs: release
+    if: needs.release.outputs.published-packages != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Publish a release per tagged package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISHED: ${{ needs.release.outputs.published-packages }}
+        run: |
+          # The server's release is published by build-server.yml, with its binaries attached.
+          echo "$PUBLISHED" | jq -c '.[] | select(.name != "@laplace.live/kakashi-server")' | while read -r pkg; do
+            name=$(echo "$pkg" | jq -r .name)
+            version=$(echo "$pkg" | jq -r .version)
+            for manifest in apps/*/package.json packages/*/package.json; do
+              [ "$(jq -r .name "$manifest")" = "$name" ] && dir=$(dirname "$manifest")
+            done
+            sh .github/scripts/changelog-section.sh "$dir/CHANGELOG.md" "$version" > notes.md
+            if [ ! -s notes.md ]; then
+              echo "::error::No CHANGELOG entry for $name@$version"
+              exit 1
+            fi
+            gh release create "$name@$version" --verify-tag --title "$name@$version" --notes-file notes.md
+          done
 
   # Runs on this master push rather than on the tag, which the github-pages
   # environment's branch protection would reject.

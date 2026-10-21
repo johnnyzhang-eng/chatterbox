@@ -32,9 +32,11 @@ bun run build        # userscript → apps/chatterbox/dist
 
 Releases use [changesets](https://github.com/changesets/changesets). Run `bunx changeset` to describe a change. On merge to master, the Release workflow keeps a Version Packages PR open. Merging that PR:
 
-- tags each bumped package and creates its GitHub Release;
+- tags each bumped package and publishes its GitHub Release;
 - deploys the userscript when `laplace-chatterbox` was bumped;
-- builds, signs and attaches the server binaries when `@laplace.live/kakashi-server` was bumped.
+- builds and signs the server binaries when `@laplace.live/kakashi-server` was bumped, then publishes its release with them attached.
+
+Releases are immutable once published (enforced for the laplace-live org), so every release is published whole: nothing can be attached afterwards.
 
 ## Credits
 
