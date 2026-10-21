@@ -8,13 +8,24 @@ import { GM_addValueChangeListener, GM_deleteValue, GM_getValue, GM_setValue } f
  */
 export function gmSignal<T>(key: string, defaultValue: T, options: { syncTabs?: boolean } = {}) {
   const s = signal<T>(GM_getValue(key, defaultValue))
-  effect(() => GM_setValue(key, s.value))
+  let applyingRemote = false
+  effect(() => {
+    const value = s.value
+    if (!applyingRemote) GM_setValue(key, value)
+  })
   if (options.syncTabs && typeof GM_addValueChangeListener === 'function') {
-    GM_addValueChangeListener<T>(key, (_name, _oldValue, newValue, remote) => {
+    GM_addValueChangeListener(key, (_name, _oldValue, _newValue, remote) => {
       if (!remote) return
-      const next = newValue === undefined ? defaultValue : newValue
-      // Equal values are skipped so the persist effect above can't ping-pong a write between tabs.
-      if (JSON.stringify(next) !== JSON.stringify(s.value)) s.value = next
+      // Re-read instead of trusting the event: callbacks for near-simultaneous writes can arrive out of order.
+      const stored = GM_getValue(key, defaultValue)
+      if (JSON.stringify(stored) === JSON.stringify(s.value)) return
+      // Not written back, so this tab can never replay another tab's older value over a newer one.
+      applyingRemote = true
+      try {
+        s.value = stored
+      } finally {
+        applyingRemote = false
+      }
     })
   }
   return s

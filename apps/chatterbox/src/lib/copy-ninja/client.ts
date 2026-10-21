@@ -11,8 +11,10 @@ import { cancelPendingCopies, handleFollow, handleMirrorAction, refreshFollow, r
 import {
   copyNinjaClaimedRole,
   copyNinjaEffectiveRole,
+  copyNinjaFollowRoom,
   copyNinjaKnownUids,
   copyNinjaMasterRoomId,
+  copyNinjaPaused,
   copyNinjaResults,
   copyNinjaRoster,
   copyNinjaSelfUid,
@@ -35,6 +37,11 @@ let retryTimer: ReturnType<typeof setTimeout> | null = null
 let retryDelayMs = RETRY_MIN_MS
 let uname = ''
 let disposers: (() => void)[] = []
+
+/** Whether this tab should be sent follows; a paused mirror reports off so resuming makes the server re-send. */
+function followsMaster(): boolean {
+  return copyNinjaFollowRoom.value && !copyNinjaPaused.value
+}
 
 function send(message: ClientMessage): void {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
@@ -113,6 +120,7 @@ function connect(id: number, uid: string): void {
       role: copyNinjaClaimedRole.value,
       roomId: cachedRoomId.value,
       visible: pageVisible.value,
+      follow: followsMaster(),
     })
   })
   ws.addEventListener('message', e => {
@@ -175,6 +183,7 @@ export function startCopyNinja(): void {
         role: copyNinjaClaimedRole.value,
         roomId: cachedRoomId.value,
         visible: pageVisible.value,
+        follow: followsMaster(),
       }
       send(presence)
     })

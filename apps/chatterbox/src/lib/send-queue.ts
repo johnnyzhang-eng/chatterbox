@@ -88,9 +88,24 @@ async function processQueue(): Promise<void> {
           await new Promise(r => setTimeout(r, HARD_MIN_GAP_MS - sinceLast))
         }
       }
-      if (item.guard && !item.guard()) {
-        item.resolve({ success: false, cancelled: true, message: item.message, isEmoticon: false, error: 'cancelled' })
-        continue
+      if (item.guard) {
+        let allowed: boolean
+        try {
+          allowed = item.guard()
+        } catch (err) {
+          item.reject(err)
+          continue
+        }
+        if (!allowed) {
+          item.resolve({
+            success: false,
+            cancelled: true,
+            message: item.message,
+            isEmoticon: false,
+            error: 'cancelled',
+          })
+          continue
+        }
       }
       try {
         const result = await sendDanmaku(item.message, item.roomId, item.csrfToken)

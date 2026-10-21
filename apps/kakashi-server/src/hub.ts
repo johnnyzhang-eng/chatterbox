@@ -16,6 +16,8 @@ export interface Peer {
   role: Role
   roomId: number | null
   visible: boolean
+  /** Whether this tab moves to the master's room when told. */
+  follow: boolean
   /** Last hello or hidden→visible transition; breaks ties when picking which tab of an account acts. */
   activeAt: number
   connectedAt: number
@@ -26,6 +28,7 @@ export interface PresenceUpdate {
   role: Role
   roomId: number | null
   visible: boolean
+  follow: boolean
 }
 
 export interface HubOptions {
@@ -94,6 +97,7 @@ export class Hub {
     peer.role = presence.role
     peer.roomId = presence.roomId
     peer.visible = presence.visible
+    peer.follow = presence.follow
     this.refresh()
   }
 
@@ -210,9 +214,13 @@ export class Hub {
         this.lastFollow.delete(uid)
         continue
       }
-      // Tabs that haven't resolved their room yet can't compare rooms; their presence update retriggers this.
-      const target = pickTab(peers.filter(p => p.roomId !== null))
-      if (!target) continue
+      // Only following tabs with a resolved room qualify; with none, forget the last follow so turning following
+      // on (or a room resolving) sends it afresh.
+      const target = pickTab(peers.filter(p => p.follow && p.roomId !== null))
+      if (!target) {
+        this.lastFollow.delete(uid)
+        continue
+      }
       const last = this.lastFollow.get(uid)
       if (last?.peerId === target.id && last.roomId === masterRoomId) continue
       this.lastFollow.set(uid, { peerId: target.id, roomId: masterRoomId })

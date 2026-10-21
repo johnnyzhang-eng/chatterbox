@@ -43,8 +43,6 @@ let wakeDrain: (() => void) | null = null
 let drainTimer: ReturnType<typeof setTimeout> | null = null
 let consecutiveFailures = 0
 
-/** Room the server last asked this tab to follow; it picks one tab per account, so other tabs never get one. */
-let followTarget: number | null = null
 let followTimer: ReturnType<typeof setTimeout> | null = null
 let followTimerRoom: number | null = null
 
@@ -98,7 +96,11 @@ async function drain(): Promise<void> {
       // A cancel while sleeping empties the queue (and may refill it for a new session).
       if (pending[0] !== next) continue
       pending.shift()
-      await copyAction(next, generation)
+      try {
+        await copyAction(next, generation)
+      } catch (err) {
+        console.error('[LAPLACE Chatterbox] Copy Ninja copy failed:', err)
+      }
     }
   } finally {
     draining = false
@@ -159,14 +161,33 @@ export function cancelPendingCopies(): void {
   wakeDrain = null
 }
 
-/** Record the room the server asked this tab to follow, then act on it if following is on. */
+function wantsFollow(target: number): boolean {
+  return shouldFollow({
+    enabled: copyNinjaFollowRoom.value,
+    paused: copyNinjaPaused.value,
+    target,
+    masterRoomId: copyNinjaMasterRoomId.value,
+    currentRoomId: cachedRoomId.value,
+  })
+}
+
+/** Move to `roomId` after a short random delay; the server only sends this to one following tab per account. */
 export function handleFollow(roomId: number): void {
-  followTarget = roomId
-  refreshFollow()
+  if (!wantsFollow(roomId) || followTimerRoom === roomId) return
+  cancelFollow()
+  const delayMs = pickDelayMs(FOLLOW_DELAY_MIN_SEC, FOLLOW_DELAY_MAX_SEC)
+  appendLog(`🥷 主控在直播间 ${roomId}，${Math.round(delayMs / 1000)} 秒后跟随`)
+  followTimerRoom = roomId
+  followTimer = setTimeout(() => {
+    followTimer = null
+    followTimerRoom = null
+    // Re-checked at fire time: the master may have come back, or following may have been turned off.
+    if (wantsFollow(roomId)) location.assign(`https://live.bilibili.com/${roomId}`)
+  }, delayMs)
 }
 
 /**
- * Schedule or cancel the move to {@link followTarget}. Reads every input signal up front so an `effect` around it
+ * Cancel a pending move once it no longer applies. Reads every input signal before bailing so an `effect` around it
  * re-runs when following is toggled, the master moves, or the pause changes.
  */
 export function refreshFollow(): void {
@@ -174,29 +195,8 @@ export function refreshFollow(): void {
   const paused = copyNinjaPaused.value
   const masterRoomId = copyNinjaMasterRoomId.value
   const currentRoomId = cachedRoomId.value
-  const target = followTarget
-  if (target === null || !shouldFollow({ enabled, paused, target, masterRoomId, currentRoomId })) {
-    cancelFollow()
-    return
-  }
-  if (followTimer && followTimerRoom === target) return
-  cancelFollow()
-  const delayMs = pickDelayMs(FOLLOW_DELAY_MIN_SEC, FOLLOW_DELAY_MAX_SEC)
-  appendLog(`🥷 主控在直播间 ${target}，${Math.round(delayMs / 1000)} 秒后跟随`)
-  followTimerRoom = target
-  followTimer = setTimeout(() => {
-    followTimer = null
-    followTimerRoom = null
-    // Re-checked at fire time: the master may have come back, or following may have been turned off.
-    const still = shouldFollow({
-      enabled: copyNinjaFollowRoom.value,
-      paused: copyNinjaPaused.value,
-      target,
-      masterRoomId: copyNinjaMasterRoomId.value,
-      currentRoomId: cachedRoomId.value,
-    })
-    if (still && followTarget === target) location.assign(`https://live.bilibili.com/${target}`)
-  }, delayMs)
+  if (followTimerRoom === null) return
+  if (!shouldFollow({ enabled, paused, target: followTimerRoom, masterRoomId, currentRoomId })) cancelFollow()
 }
 
 function cancelFollow(): void {
@@ -209,5 +209,4 @@ function cancelFollow(): void {
 export function resetMirror(): void {
   cancelPendingCopies()
   cancelFollow()
-  followTarget = null
 }

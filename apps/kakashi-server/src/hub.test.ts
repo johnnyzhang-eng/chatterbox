@@ -13,7 +13,7 @@ function createHub(options: { masterGraceMs?: number } = {}) {
   const hub = new Hub({ masterGraceMs: options.masterGraceMs ?? 0, now: () => now })
   const inbox = new Map<string, ServerMessage[]>()
 
-  function join(id: string, uid: string, role: Role, roomId: number | null, visible = true): void {
+  function join(id: string, uid: string, role: Role, roomId: number | null, visible = true, follow = true): void {
     const messages: ServerMessage[] = []
     inbox.set(id, messages)
     now += 1
@@ -24,6 +24,7 @@ function createHub(options: { masterGraceMs?: number } = {}) {
       role,
       roomId,
       visible,
+      follow,
       activeAt: now,
       connectedAt: now,
       send: message => messages.push(message),
@@ -83,7 +84,7 @@ describe('master election', () => {
     const { hub, join } = createHub({ masterGraceMs: 60_000 })
     join('a', '1', 'master', ROOM)
     join('b', '2', 'master', ROOM)
-    hub.update('a', { role: 'mirror', roomId: ROOM, visible: true })
+    hub.update('a', { role: 'mirror', roomId: ROOM, visible: true, follow: true })
     expect(hub.roster().members[0]).toMatchObject({ uid: '2', role: 'master' })
     hub.stop()
   })
@@ -167,8 +168,8 @@ describe('room following', () => {
     join('x', '2', 'mirror', ROOM)
     expect(received('x', 'follow')).toHaveLength(0)
     clear()
-    hub.update('m1', { role: 'master', roomId: ROOM, visible: false })
-    hub.update('m2', { role: 'master', roomId: OTHER_ROOM, visible: true })
+    hub.update('m1', { role: 'master', roomId: ROOM, visible: false, follow: true })
+    hub.update('m2', { role: 'master', roomId: OTHER_ROOM, visible: true, follow: true })
     expect(received('x', 'follow')).toEqual([{ type: 'follow', roomId: OTHER_ROOM }])
   })
 
@@ -177,7 +178,7 @@ describe('room following', () => {
     join('m', '1', 'master', ROOM)
     join('x', '2', 'mirror', null)
     expect(received('x', 'follow')).toHaveLength(0)
-    hub.update('x', { role: 'mirror', roomId: OTHER_ROOM, visible: true })
+    hub.update('x', { role: 'mirror', roomId: OTHER_ROOM, visible: true, follow: true })
     expect(received('x', 'follow')).toEqual([{ type: 'follow', roomId: ROOM }])
   })
 
@@ -185,7 +186,7 @@ describe('room following', () => {
     const { hub, join, received } = createHub()
     join('m', '1', 'master', ROOM)
     join('x', '2', 'mirror', OTHER_ROOM)
-    hub.update('x', { role: 'mirror', roomId: 300, visible: true })
+    hub.update('x', { role: 'mirror', roomId: 300, visible: true, follow: true })
     expect(received('x', 'follow')).toEqual([
       { type: 'follow', roomId: ROOM },
       { type: 'follow', roomId: ROOM },
@@ -198,8 +199,26 @@ describe('room following', () => {
     join('m2', '1', 'master', ROOM)
     join('x', '2', 'mirror', ROOM)
     advance(10)
-    hub.update('m1', { role: 'master', roomId: OTHER_ROOM, visible: true })
+    hub.update('m1', { role: 'master', roomId: OTHER_ROOM, visible: true, follow: true })
     expect(hub.roster().masterRoomId).toBe(OTHER_ROOM)
     expect(received('x', 'follow')).toEqual([{ type: 'follow', roomId: OTHER_ROOM }])
+  })
+
+  test('only a following tab of the account is sent the follow', () => {
+    const { join, received } = createHub()
+    join('m', '1', 'master', ROOM)
+    join('x-visible', '2', 'mirror', OTHER_ROOM, true, false)
+    join('x-following', '2', 'mirror', OTHER_ROOM, false, true)
+    expect(received('x-visible', 'follow')).toHaveLength(0)
+    expect(received('x-following', 'follow')).toEqual([{ type: 'follow', roomId: ROOM }])
+  })
+
+  test('turning following off and on again re-sends the follow', () => {
+    const { hub, join, received } = createHub()
+    join('m', '1', 'master', ROOM)
+    join('x', '2', 'mirror', OTHER_ROOM)
+    hub.update('x', { role: 'mirror', roomId: OTHER_ROOM, visible: true, follow: false })
+    hub.update('x', { role: 'mirror', roomId: OTHER_ROOM, visible: true, follow: true })
+    expect(received('x', 'follow')).toHaveLength(2)
   })
 })

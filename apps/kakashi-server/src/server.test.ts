@@ -28,6 +28,7 @@ function hello(overrides: Partial<HelloMessage>): HelloMessage {
     role: 'mirror',
     roomId: 100,
     visible: true,
+    follow: false,
     ...overrides,
   }
 }

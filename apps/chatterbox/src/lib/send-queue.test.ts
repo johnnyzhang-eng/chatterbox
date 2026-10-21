@@ -40,6 +40,17 @@ describe('enqueueDanmaku guard', () => {
     expect(sent).not.toHaveBeenCalled()
   })
 
+  test('a throwing guard rejects only its own item and the queue keeps draining', async () => {
+    const { queue, sendDanmaku } = await loadQueue()
+    const broken = queue.enqueueDanmaku('broken', 1, 'csrf', queue.SendPriority.COPY, 'copy', () => {
+      throw new Error('boom')
+    })
+    const next = queue.enqueueDanmaku('next', 1, 'csrf', queue.SendPriority.COPY, 'copy')
+    await expect(broken).rejects.toThrow('boom')
+    expect(await next).toMatchObject({ success: true })
+    expect(sendDanmaku.mock.calls.map(call => call[0])).toEqual(['next'])
+  })
+
   test('the guard runs at dispatch, after the rate-limit wait, not at enqueue', async () => {
     const { queue, sendDanmaku } = await loadQueue()
     let allowed = true

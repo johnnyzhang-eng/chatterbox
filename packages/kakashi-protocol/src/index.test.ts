@@ -14,6 +14,7 @@ const hello: HelloMessage = {
   role: 'mirror',
   roomId: 21452505,
   visible: true,
+  follow: false,
 }
 
 describe('parseClientMessage', () => {
@@ -23,6 +24,19 @@ describe('parseClientMessage', () => {
 
   test('rejects a non-numeric uid', () => {
     expect(parseClientMessage({ ...hello, uid: 'abc' })).toBeNull()
+  })
+
+  test('requires the follow flag on hello and presence', () => {
+    const { follow: _, ...withoutFollow } = hello
+    expect(parseClientMessage(withoutFollow)).toBeNull()
+    expect(parseClientMessage({ type: 'presence', role: 'mirror', roomId: 1, visible: true })).toBeNull()
+    expect(parseClientMessage({ type: 'presence', role: 'mirror', roomId: 1, visible: true, follow: true })).toEqual({
+      type: 'presence',
+      role: 'mirror',
+      roomId: 1,
+      visible: true,
+      follow: true,
+    })
   })
 
   test('accepts a null room for a tab that has not resolved its room yet', () => {

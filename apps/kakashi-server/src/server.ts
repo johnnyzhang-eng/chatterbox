@@ -135,6 +135,7 @@ export function startKakashiServer(options: KakashiServerOptions) {
       role: hello.role,
       roomId: hello.roomId,
       visible: hello.visible,
+      follow: hello.follow,
       activeAt: now,
       connectedAt: now,
       send: message => send(ws, message),

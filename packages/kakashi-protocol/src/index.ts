@@ -50,6 +50,8 @@ export interface HelloMessage {
   role: Role
   roomId: number | null
   visible: boolean
+  /** Whether this tab moves to the master's room when told (following on and not paused). */
+  follow: boolean
 }
 
 export interface PresenceMessage {
@@ -57,6 +59,7 @@ export interface PresenceMessage {
   role: Role
   roomId: number | null
   visible: boolean
+  follow: boolean
 }
 
 export interface ActionMessage {
@@ -110,7 +113,7 @@ export interface ResultDeliveryMessage {
   detail?: string
 }
 
-/** Sent to one tab per mirror uid whose rooms don't include the master's. */
+/** Sent to one following tab per mirror uid whose tabs are all outside the master's room. */
 export interface FollowMessage {
   type: 'follow'
   roomId: number
@@ -205,16 +208,18 @@ export function parseClientMessage(raw: unknown): ClientMessage | null {
   if (!isRecord(raw)) return null
   switch (raw.type) {
     case 'hello': {
-      const { protocol, token, clientVersion, uid, uname, role, roomId, visible } = raw
+      const { protocol, token, clientVersion, uid, uname, role, roomId, visible, follow } = raw
       if (typeof protocol !== 'number' || !isShortString(token, MAX_TOKEN) || !isShortString(clientVersion)) return null
       if (!isUid(uid) || !isShortString(uname) || !isRole(role) || !isNullableRoomId(roomId)) return null
-      if (typeof visible !== 'boolean') return null
-      return { type: 'hello', protocol, token, clientVersion, uid, uname, role, roomId, visible }
+      if (typeof visible !== 'boolean' || typeof follow !== 'boolean') return null
+      return { type: 'hello', protocol, token, clientVersion, uid, uname, role, roomId, visible, follow }
     }
     case 'presence': {
-      const { role, roomId, visible } = raw
-      if (!isRole(role) || !isNullableRoomId(roomId) || typeof visible !== 'boolean') return null
-      return { type: 'presence', role, roomId, visible }
+      const { role, roomId, visible, follow } = raw
+      if (!isRole(role) || !isNullableRoomId(roomId) || typeof visible !== 'boolean' || typeof follow !== 'boolean') {
+        return null
+      }
+      return { type: 'presence', role, roomId, visible, follow }
     }
     case 'action': {
       const action = parseAction(raw.action)

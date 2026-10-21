@@ -106,10 +106,12 @@ async function loadClient(uid: string, gm: Record<string, unknown>): Promise<Har
     files,
     plugins: [gmStub],
     target: 'bun',
-    // Bun has no DOM; give the bundle its own `document` instead of touching globals other test files share.
-    banner:
+    // Bun has no DOM; give the bundle its own `document`/`location` instead of touching globals other tests share.
+    banner: [
       'const __harnessDocument = { visibilityState: "visible", addEventListener() {}, removeEventListener() {} };',
-    define: { document: '__harnessDocument' },
+      'const __harnessLocation = { assign() {} };',
+    ].join('\n'),
+    define: { document: '__harnessDocument', location: '__harnessLocation' },
   })
   const output = result.outputs[0]
   if (!result.success || !output) throw new AggregateError(result.logs, 'harness build failed')
@@ -244,4 +246,13 @@ test('an emote this mirror lacks is skipped instead of posted as text', async ()
   await until(() => resultFor('2')?.status === 'skipped', 'the emote skip')
   expect(resultFor('2')?.detail).toBe('该账号无法使用此表情')
   expect(mirror.sendQueue.sent).toHaveLength(0)
+})
+
+test('turning following on after connecting schedules the move to the master room', async () => {
+  const { mirror } = await setup()
+  mirror.store.cachedRoomId.value = OTHER_ROOM
+  await Bun.sleep(100)
+  expect(mirror.logs.some(line => line.includes('秒后跟随'))).toBe(false)
+  mirror.settings.copyNinjaFollowRoom.value = true
+  await until(() => mirror.logs.some(line => line.includes(`主控在直播间 ${ROOM}`)), 'the scheduled follow')
 })
