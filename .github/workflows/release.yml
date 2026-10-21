@@ -37,7 +37,7 @@ jobs:
 
       - uses: actions/upload-pages-artifact@v5
         with:
-          path: dist
+          path: apps/chatterbox/dist
 
       - id: deployment
         uses: actions/deploy-pages@v5
@@ -58,11 +58,11 @@ jobs:
         run: |
           # Short cache on meta.js so update checks see new versions quickly;
           # user.js is only fetched after a version bump so it can cache longer.
-          aws s3 cp dist/laplace-chatterbox.user.js "s3://$R2_BUCKET/chatterbox/laplace-chatterbox.user.js" \
+          aws s3 cp apps/chatterbox/dist/laplace-chatterbox.user.js "s3://$R2_BUCKET/chatterbox/laplace-chatterbox.user.js" \
             --endpoint-url "$R2_ENDPOINT" \
             --content-type "text/javascript; charset=utf-8" \
             --cache-control "public, max-age=120"
-          aws s3 cp dist/laplace-chatterbox.meta.js "s3://$R2_BUCKET/chatterbox/laplace-chatterbox.meta.js" \
+          aws s3 cp apps/chatterbox/dist/laplace-chatterbox.meta.js "s3://$R2_BUCKET/chatterbox/laplace-chatterbox.meta.js" \
             --endpoint-url "$R2_ENDPOINT" \
             --content-type "text/javascript; charset=utf-8" \
             --cache-control "public, max-age=60"

@@ -4,6 +4,13 @@
   "workspaces": {
     "": {
       "name": "laplace-userscripts",
+      "devDependencies": {
+        "@biomejs/biome": "^2.5.15",
+      },
+    },
+    "apps/chatterbox": {
+      "name": "laplace-chatterbox",
+      "version": "4.3.0",
       "dependencies": {
         "@preact/signals": "^2.11.3",
         "@tabler/icons-preact": "^3.49.0",
@@ -11,7 +18,6 @@
         "preact": "^11.0.1",
       },
       "devDependencies": {
-        "@biomejs/biome": "^2.5.15",
         "@laplace.live/internal": "^1.3.39",
         "@preact/preset-vite": "^2.10.6",
         "@soniox/client": "^2.3.0",
@@ -383,6 +389,8 @@
     "json5": ["json5@2.2.3", "", { "bin": { "json5": "lib/cli.js" } }, "sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg=="],
 
     "kolorist": ["kolorist@1.8.0", "", {}, "sha512-Y+60/zizpJ3HRH8DCss+q95yr6145JXZo46OTpFvDZWLfRCE4qChOyk1b26nMaNpfHHgxagk9dXT5OP0Tfe+dQ=="],
+
+    "laplace-chatterbox": ["laplace-chatterbox@workspace:apps/chatterbox"],
 
     "lightningcss": ["lightningcss@1.33.0", "", { "dependencies": { "detect-libc": "^2.0.3" }, "optionalDependencies": { "lightningcss-android-arm64": "1.33.0", "lightningcss-darwin-arm64": "1.33.0", "lightningcss-darwin-x64": "1.33.0", "lightningcss-freebsd-x64": "1.33.0", "lightningcss-linux-arm-gnueabihf": "1.33.0", "lightningcss-linux-arm64-gnu": "1.33.0", "lightningcss-linux-arm64-musl": "1.33.0", "lightningcss-linux-x64-gnu": "1.33.0", "lightningcss-linux-x64-musl": "1.33.0", "lightningcss-win32-arm64-msvc": "1.33.0", "lightningcss-win32-x64-msvc": "1.33.0" } }, "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA=="],
 
