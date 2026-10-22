@@ -1,11 +1,12 @@
 import type { ActionDeliveryMessage, CopyStatus } from '@laplace.live/kakashi-protocol'
 
-import { getCsrfToken } from '../api'
+import { getCsrfToken, type SendDanmakuResult } from '../api'
 import { isEmoticonUnique, isLockedEmoticon, isUnavailableEmoticon, looksLikeEmoticonUnique } from '../emoticon'
 import { describeLlmGap, polishWithLlm } from '../llm-tasks'
 import { appendLog } from '../log'
 import { applyReplacements } from '../replacement'
-import { enqueueDanmaku, SendPriority } from '../send-queue'
+import { automaticSendGuard, onAutomaticSendStop } from '../send-control'
+import { cancelQueuedDanmaku, enqueueDanmaku, SendPriority } from '../send-queue'
 import { cachedRoomId, maxLength } from '../store'
 import { formatDanmakuError, processMessages } from '../utils'
 import { pickDelayMs, planCopy, shouldFollow } from './decisions'
@@ -43,7 +44,6 @@ interface PendingCopy {
 /** A copy still unsent this long after its planned time (throttled background tab, long queue) is dropped as stale. */
 const STALE_MS = 10_000
 const MAX_PENDING = 20
-const PAUSE_AFTER_FAILURES = 3
 const FOLLOW_DELAY_MIN_SEC = 2
 const FOLLOW_DELAY_MAX_SEC = 5
 
@@ -57,7 +57,6 @@ let generation = 0
 let rewriteAbort = new AbortController()
 let wakeDrain: (() => void) | null = null
 let drainTimer: ReturnType<typeof setTimeout> | null = null
-let consecutiveFailures = 0
 
 let followTimer: ReturnType<typeof setTimeout> | null = null
 let followTimerRoom: number | null = null
@@ -169,6 +168,13 @@ async function copyAction({ msg: { eventId, action }, plannedAt, report, rewrite
     return report(eventId, 'skipped', '该账号无法使用此表情')
   }
   const label = `跟随·${SOURCE_LABELS[action.source]}`
+  const stillWanted = automaticSendGuard(
+    () =>
+      gen === generation &&
+      !copyNinjaPaused.value &&
+      Date.now() - plannedAt <= STALE_MS &&
+      cachedRoomId.value === action.roomId
+  )
   let text = action.text
   if (rewrite) {
     const rewritten = await rewrite.result
@@ -181,42 +187,37 @@ async function copyAction({ msg: { eventId, action }, plannedAt, report, rewrite
     appendLog(`✨ ${label} 感知忍術：${action.text} → ${text}`)
   }
   const segments = isEmoticonUnique(text) ? [text] : processMessages(text, maxLength.value)
-  // Re-checks the room: the tab may have moved during the rewrite or the queue wait.
-  const stillWanted = () =>
-    gen === generation &&
-    !copyNinjaPaused.value &&
-    Date.now() - plannedAt <= STALE_MS &&
-    cachedRoomId.value === action.roomId
   for (const segment of segments) {
-    const result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.COPY, 'copy', stillWanted)
+    let result: SendDanmakuResult
+    try {
+      result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.COPY, 'copy', stillWanted)
+    } catch (err) {
+      return report(eventId, 'failed', err instanceof Error ? err.message : String(err))
+    }
     if (result.cancelled) return report(eventId, 'skipped', '已取消')
     appendLog(result, label, segment)
     if (!result.success) {
-      recordFailure()
       return report(eventId, 'failed', formatDanmakuError(result.error))
     }
+    if (gen !== generation) return
   }
-  consecutiveFailures = 0
   report(eventId, 'sent', rewrite ? `感知忍術：${text}` : undefined)
 }
 
-function recordFailure(): void {
-  consecutiveFailures++
-  if (consecutiveFailures < PAUSE_AFTER_FAILURES || copyNinjaPaused.value) return
+onAutomaticSendStop(() => {
   copyNinjaPaused.value = true
   cancelPendingCopies()
-  appendLog(`⏸️ 拷贝忍者：连续 ${PAUSE_AFTER_FAILURES} 次跟随失败（可能被禁言或触发风控），已暂停，可在「忍者」页恢复`)
-}
+})
 
-/** Clear the pause and failure streak. */
+/** Explicitly resume copying after a failure. */
 export function resumeMirror(): void {
-  consecutiveFailures = 0
   copyNinjaPaused.value = false
 }
 
 /** Drop queued and in-queue copies (disconnect, stop, pause). */
 export function cancelPendingCopies(): void {
   generation++
+  cancelQueuedDanmaku('copy')
   rewriteAbort.abort()
   rewriteAbort = new AbortController()
   pending.length = 0

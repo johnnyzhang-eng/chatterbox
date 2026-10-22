@@ -3,7 +3,6 @@ import { useEffect, useRef } from 'preact/hooks'
 
 import type { SttChunk, SttProvider, SttSessionParams } from '../lib/stt/types'
 
-import { tryAiEvasion } from '../lib/ai-evasion'
 import { ensureRoomId, getCsrfToken } from '../lib/api'
 import {
   DEEPGRAM_DEFAULT_MODEL,
@@ -182,22 +181,21 @@ export function SttTab() {
   }
 
   const sendSegment = async (segment: string) => {
-    if (!segment.trim()) return
+    if (!segment.trim()) return true
     try {
       const roomId = await ensureRoomId()
       const csrfToken = getCsrfToken()
       if (!csrfToken) {
         appendLog('❌ 同传：未找到登录信息')
-        return
+        return false
       }
       const result = await enqueueDanmaku(segment, roomId, csrfToken, SendPriority.STT, 'stt')
       appendLog(result, '同传', segment)
-      if (!result.success && !result.cancelled) {
-        await tryAiEvasion(segment, roomId, csrfToken, '同传', 'stt')
-      }
+      return result.success
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       appendLog(`🔴 同传发送出错：${msg}`)
+      return false
     }
   }
 
@@ -220,7 +218,7 @@ export function SttTab() {
       for (const segment of segments) {
         const clean = stripTrailingPunctuation(segment)
         if (!clean) continue
-        await sendSegment(wrapSegment(clean, wrap))
+        if (!(await sendSegment(wrapSegment(clean, wrap)))) break
       }
     } finally {
       isFlushing.current = false

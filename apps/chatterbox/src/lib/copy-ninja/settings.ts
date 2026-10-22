@@ -33,7 +33,7 @@ export const copyNinjaDelayMaxSec = gmSignal('copyNinjaDelayMaxSec', 4, SYNC)
 export const copyNinjaFollowRoom = gmSignal('copyNinjaFollowRoom', false, SYNC)
 /** 感知忍術: rewrite each master action through the LLM (`kanchi` prompt) instead of copying it verbatim. */
 export const copyNinjaKanchi = gmSignal('copyNinjaKanchi', false, SYNC)
-/** Set after repeated copy failures (mute / risk control); persisted so a reload or room follow can't resume copying. */
+/** Set after an automatic send failure; persisted so a reload or room follow can't resume copying. */
 export const copyNinjaPaused = gmSignal('copyNinjaPaused', false, SYNC)
 
 export type CopyNinjaStatus = 'off' | 'connecting' | 'connected' | 'error'

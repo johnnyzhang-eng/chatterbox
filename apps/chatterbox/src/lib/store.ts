@@ -20,6 +20,7 @@ import { resolveInvisibleChar } from './utils'
 
 // GM-persisted settings
 export const msgSendInterval = gmSignal('msgSendInterval', 1)
+export const autoSendMaxMessages = gmSignal('autoSendMaxMessages', 0)
 export const maxLength = gmSignal('maxLength', 38)
 export const randomColor = gmSignal('randomColor', false)
 export const randomInterval = gmSignal('randomInterval', false)

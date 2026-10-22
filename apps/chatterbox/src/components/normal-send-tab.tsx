@@ -1,6 +1,5 @@
 import { useSignal } from '@preact/signals'
 
-import { tryAiEvasion } from '../lib/ai-evasion'
 import { ensureRoomId, getCsrfToken } from '../lib/api'
 import {
   formatLockedEmoticonReject,
@@ -14,7 +13,6 @@ import { appendLog } from '../lib/log'
 import { applyReplacements } from '../lib/replacement'
 import { enqueueDanmaku, SendPriority } from '../lib/send-queue'
 import {
-  aiEvasion,
   fasongText,
   invisibleChar,
   llmActivePromptNormalSend,
@@ -139,9 +137,7 @@ export function NormalSendTab() {
         const displayMsg = wasReplaced && total === 1 ? `${originalMessage} → ${segment}` : segment
 
         appendLog(result, label, displayMsg)
-        if (!result.success) {
-          await tryAiEvasion(segment, roomId, csrfToken, '', 'manual')
-        }
+        if (!result.success) break
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -230,14 +226,6 @@ export function NormalSendTab() {
         </div>
 
         <div class='my-2 flex flex-wrap items-center gap-2'>
-          <Checkbox
-            id='aiEvasion'
-            checked={aiEvasion.value}
-            onInput={e => {
-              aiEvasion.value = e.currentTarget.checked
-            }}
-            label='AI规避（发送失败时自动检测敏感词并重试）'
-          />
           <Checkbox
             id='normalSendWrapBrackets'
             checked={normalSendWrapBrackets.value}

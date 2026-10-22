@@ -1,6 +1,17 @@
-import type { DanmakuConfigResponse } from '../types'
+import { effect, signal, untracked } from '@preact/signals'
 
-import { ensureRoomId, fetchEmoticons, getCsrfToken, getSpmPrefix, setDanmakuMode, setRandomDanmakuColor } from './api'
+import type { DanmakuConfigResponse } from '../types'
+import type { SendObserver } from './send-stats'
+
+import {
+  ensureRoomId,
+  fetchEmoticons,
+  getCsrfToken,
+  getSpmPrefix,
+  type SendDanmakuResult,
+  setDanmakuMode,
+  setRandomDanmakuColor,
+} from './api'
 import { BASE_URL } from './const'
 import {
   formatLockedEmoticonReject,
@@ -12,9 +23,11 @@ import {
 import { isLlmReady, polishWithLlm } from './llm-tasks'
 import { appendLog } from './log'
 import { applyReplacements, buildReplacementMap } from './replacement'
-import { enqueueDanmaku, SendPriority } from './send-queue'
+import { automaticSendGuard, onAutomaticSendStop } from './send-control'
+import { cancelQueuedDanmaku, enqueueDanmaku, SendPriority } from './send-queue'
 import {
   activeTemplateIndex,
+  autoSendMaxMessages,
   autoSendYolo,
   availableDanmakuColors,
   cachedRoomId,
@@ -32,11 +45,133 @@ import { processMessages, resolveSendDelayMs } from './utils'
 import { cachedWbiKeys, encodeWbi, waitForWbiKeys } from './wbi'
 
 let currentAbort: AbortController | null = null
+let loopRunning = false
 
-export function cancelLoop(): void {
+export type AutoSendStopReason = 'manual' | 'limit' | 'failure' | 'cancelled' | 'preparation-error' | null
+
+export interface AutoSendRun {
+  runId: number
+  limit: number
+  requests: number
+  accepted: number
+  failed: number
+  cancelled: number
+  preparationFailed: number
+  active: boolean
+  stopReason: AutoSendStopReason
+}
+
+export const autoSendRun = signal<AutoSendRun>({
+  runId: 0,
+  limit: 0,
+  requests: 0,
+  accepted: 0,
+  failed: 0,
+  cancelled: 0,
+  preparationFailed: 0,
+  active: false,
+  stopReason: null,
+})
+let nextRunId = 0
+
+function cancelRound(): void {
   currentAbort?.abort()
   currentAbort = null
+  cancelQueuedDanmaku('loop')
 }
+
+function stopRun(runId: number, reason: AutoSendStopReason): void {
+  const run = autoSendRun.peek()
+  if (run.runId !== runId) return
+  autoSendRun.value = { ...run, active: false, stopReason: reason }
+  cancelRound()
+  sendMsg.value = false
+}
+
+/** Stop this loop batch; an already dispatched request keeps its original receipt. */
+export function cancelLoop(reason: AutoSendStopReason = 'manual'): void {
+  stopRun(autoSendRun.peek().runId, reason)
+}
+
+effect(() => {
+  const enabled = sendMsg.value
+  untracked(() => {
+    cancelRound()
+    const previous = autoSendRun.peek()
+    if (enabled) {
+      const configured = autoSendMaxMessages.peek()
+      const valid = Number.isSafeInteger(configured) && configured >= 0
+      const limit = valid ? configured : 0
+      autoSendRun.value = {
+        runId: ++nextRunId,
+        limit,
+        requests: 0,
+        accepted: 0,
+        failed: 0,
+        cancelled: 0,
+        preparationFailed: 0,
+        active: true,
+        stopReason: null,
+      }
+      if (!valid) {
+        appendLog('❌ 本次请求上限必须是非负安全整数，已停止，未发送')
+        recordPreparationFailure(autoSendRun.peek().runId)
+      }
+    } else if (previous.active) {
+      autoSendRun.value = { ...previous, active: false, stopReason: 'manual' }
+    }
+  })
+})
+
+function recordPreparationFailure(runId: number): void {
+  const run = autoSendRun.peek()
+  if (run.runId !== runId) return
+  autoSendRun.value = { ...run, preparationFailed: run.preparationFailed + 1 }
+  stopRun(runId, 'preparation-error')
+}
+
+function hasBudget(runId: number): boolean {
+  const run = autoSendRun.peek()
+  return run.runId === runId && run.active && (run.limit === 0 || run.requests < run.limit)
+}
+
+function runObserver(runId: number, isCurrent: () => boolean): { observer: SendObserver; guard: () => boolean } {
+  let requested = false
+  let settled = false
+  const observer: SendObserver = {
+    onRequestStart: () => {
+      if (requested) return
+      requested = true
+      const run = autoSendRun.peek()
+      if (run.runId === runId) autoSendRun.value = { ...run, requests: run.requests + 1 }
+    },
+    onResult: result => {
+      if (settled) return
+      settled = true
+      const run = autoSendRun.peek()
+      if (run.runId !== runId) return
+      if (requested) {
+        autoSendRun.value = {
+          ...run,
+          accepted: run.accepted + Number(result.success),
+          failed: run.failed + Number(!result.success),
+        }
+      } else if (result.cancelled) {
+        autoSendRun.value = { ...run, cancelled: run.cancelled + 1 }
+      } else {
+        autoSendRun.value = { ...run, preparationFailed: run.preparationFailed + 1 }
+      }
+    },
+  }
+  return { observer, guard: () => isCurrent() && (requested || hasBudget(runId)) }
+}
+
+onAutomaticSendStop(() => {
+  const run = autoSendRun.peek()
+  if (run.active) cancelLoop(run.preparationFailed > 0 ? 'preparation-error' : 'failure')
+  else cancelRound()
+  appendLog('⏸️ 自动发送已停止：请求失败或被拒绝，未发内容已取消，不会自动改写重试')
+})
 
 function abortableSleep(ms: number, signal: AbortSignal): Promise<boolean> {
   return new Promise(resolve => {
@@ -58,7 +193,18 @@ function abortableSleep(ms: number, signal: AbortSignal): Promise<boolean> {
 
 /** Main loop: auto-send (独轮车), room init, danmaku config, message sending. */
 export async function loop(): Promise<void> {
+  if (loopRunning) return
+  loopRunning = true
+  try {
+    await runLoop()
+  } finally {
+    loopRunning = false
+  }
+}
+
+async function runLoop(): Promise<void> {
   let count = 0
+  const preparingRun = autoSendRun.peek()
 
   let roomId = cachedRoomId.value
   if (roomId === null) {
@@ -116,187 +262,159 @@ export async function loop(): Promise<void> {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       appendLog(`❌ 获取房间ID失败: ${message}`)
+      if (preparingRun.active) recordPreparationFailure(preparingRun.runId)
       await new Promise(r => setTimeout(r, 5000))
       return
     }
   }
 
-  const csrfToken = getCsrfToken()
-
+  let lastRunId = 0
   while (true) {
-    if (sendMsg.value) {
-      currentAbort = new AbortController()
-      const { signal } = currentAbort
-
-      const currentTemplate = msgTemplates.value[activeTemplateIndex.value] ?? ''
-      if (!currentTemplate.trim()) {
-        appendLog('⚠️ 当前模板为空，已自动停止运行')
-        sendMsg.value = false
-        currentAbort = null
-        continue
+    const run = autoSendRun.peek()
+    if (!sendMsg.value || !run.active) {
+      await new Promise(r => setTimeout(r, 1000))
+      continue
+    }
+    if (run.runId !== lastRunId) {
+      lastRunId = run.runId
+      count = 0
+    }
+    currentAbort = new AbortController()
+    const controller = currentAbort
+    const { signal } = controller
+    const isCurrent = automaticSendGuard(
+      () =>
+        currentAbort === controller &&
+        !signal.aborted &&
+        sendMsg.value &&
+        autoSendRun.peek().runId === run.runId &&
+        autoSendRun.peek().active
+    )
+    const canContinue = () => {
+      if (!isCurrent()) return false
+      if (!hasBudget(run.runId)) {
+        stopRun(run.runId, 'limit')
+        return false
       }
+      return true
+    }
+    const preparationFailuresBefore = autoSendRun.peek().preparationFailed
 
+    try {
+      if (!canContinue()) continue
+      const csrfToken = getCsrfToken()
+      if (!csrfToken) throw new Error('未找到登录信息，请先登录 Bilibili')
+      const currentTemplate = msgTemplates.value[activeTemplateIndex.value] ?? ''
+      if (!currentTemplate.trim()) throw new Error('当前模板为空')
       const interval = msgSendInterval.value
       const enableRandomColor = randomColor.value
       const enableRandomInterval = randomInterval.value
       const randomCharToInsert = randomChar.value ? invisibleChar.value : undefined
+      const yolo = autoSendYolo.value
+      if (yolo && !isLlmReady('autoSend')) throw new Error('YOLO 已开启，但 LLM 配置不完整')
 
-      // Parsed once so both YOLO and legacy paths share the same input.
-      const rawLines = currentTemplate
-        .split('\n')
-        .map(l => l?.trim() ?? '')
-        .filter(l => l.length > 0)
-
-      // Pre-built upfront so `[i+1/N]` has a stable denominator; only the polish CALLS are deferred (just-in-time, right before send).
-      type SendTask = { kind: 'direct'; text: string } | { kind: 'polish'; text: string }
-
+      type SendTask = { polish: boolean; text: string }
       const tasks: SendTask[] = []
-      if (autoSendYolo.value) {
-        // Loud bail, not silent fallback to unpolished text: the user opted into polish. Checked once at round start to fail fast; per-segment failures below stay recoverable.
-        if (!isLlmReady('autoSend')) {
-          appendLog('❌ 独轮车 YOLO 模式已开启，但 LLM 配置不完整，已自动停止运行')
-          sendMsg.value = false
-          currentAbort = null
-          continue
-        }
-        // randomChar (dedup marker) suppressed on LLM input — the LLM would ignore or "fix" it; re-applied on output in the polish branch below.
-        for (const line of rawLines) {
-          if (isEmoticonUnique(line)) {
-            tasks.push({ kind: 'direct', text: line })
-          } else {
-            for (const chunk of processMessages(line, maxLength.value)) {
-              tasks.push({ kind: 'polish', text: chunk })
-            }
-          }
-        }
-      } else {
-        // Non-YOLO: randomChar applied here at split time.
-        for (const line of rawLines) {
-          if (isEmoticonUnique(line)) {
-            tasks.push({ kind: 'direct', text: line })
-          } else {
-            for (const chunk of processMessages(line, maxLength.value, randomCharToInsert)) {
-              tasks.push({ kind: 'direct', text: chunk })
-            }
+      for (const line of currentTemplate
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)) {
+        if (isEmoticonUnique(line)) tasks.push({ polish: false, text: line })
+        else {
+          for (const chunk of processMessages(line, maxLength.value, yolo ? undefined : randomCharToInsert)) {
+            tasks.push({ polish: yolo, text: chunk })
           }
         }
       }
+      if (tasks.length === 0) throw new Error('当前模板没有可发送片段')
 
-      const total = tasks.length
       let completed = true
-      // Labelled so the inner sub-segment loop can bail out of both loops on abort/stop.
-      outer: for (let i = 0; i < total; i++) {
-        if (signal.aborted) {
+      outer: for (let i = 0; i < tasks.length; i++) {
+        if (!canContinue()) {
           completed = false
           break
         }
-        if (!sendMsg.value) break
-
         const task = tasks[i]
-        let sendItems: string[]
-
-        if (task.kind === 'polish') {
-          try {
-            const polished = await polishWithLlm('autoSend', task.text, { signal })
-            if (!polished.trim()) {
-              // Empty polish = refusal; sleep first so a streak doesn't spin past the configured cadence.
-              appendLog(`⚠️ 独轮车 AI 返回为空，跳过本段：${task.text}`)
-              const ok = await abortableSleep(resolveSendDelayMs(interval, enableRandomInterval), signal)
-              if (!ok) {
-                completed = false
-                break
-              }
-              continue
-            }
-            appendLog(`✨ 独轮车 AI 润色：${task.text} → ${polished}`)
-            // Re-process: output may exceed maxLength, and randomChar (suppressed on input) applies now.
-            sendItems = processMessages(polished, maxLength.value, randomCharToInsert)
-          } catch (err) {
-            // AbortError = 停车 mid-polish; propagate as "round aborted" so the success log doesn't fire.
-            if (err instanceof DOMException && err.name === 'AbortError') {
-              completed = false
-              break
-            }
-            // Skip this segment, keep the round; sleep first so a broken LLM doesn't spin past cadence.
-            const msg = err instanceof Error ? err.message : String(err)
-            appendLog(`🔴 独轮车 AI 润色失败，跳过本段：${msg}`)
-            const ok = await abortableSleep(resolveSendDelayMs(interval, enableRandomInterval), signal)
-            if (!ok) {
-              completed = false
-              break
-            }
-            continue
+        let sendItems = [task.text]
+        if (task.polish) {
+          const polished = await polishWithLlm('autoSend', task.text, { signal })
+          if (!canContinue()) {
+            completed = false
+            break
           }
-        } else {
-          sendItems = [task.text]
+          if (!polished.trim()) throw new Error('独轮车 AI 返回为空')
+          appendLog(`✨ 独轮车 AI 润色：${task.text} → ${polished}`)
+          sendItems = processMessages(polished, maxLength.value, randomCharToInsert)
+          if (sendItems.length === 0) throw new Error('AI 润色后没有可发送片段')
         }
 
-        // Sub-items (2+ when polish overran maxLength) share one `[i+1/total]` label as one polish unit.
-        for (let j = 0; j < sendItems.length; j++) {
-          if (signal.aborted) {
+        for (const [j, message] of sendItems.entries()) {
+          if (!canContinue()) {
             completed = false
             break outer
           }
-          if (!sendMsg.value) break outer
-
-          const message = sendItems[j]
-
-          // Skip locked emotes client-side rather than let Bilibili reject them; still sleep to keep cadence.
-          if (isLockedEmoticon(message)) {
-            const skipLabel = total > 1 ? `自动表情 [${i + 1}/${total}]` : '自动表情'
-            appendLog(formatLockedEmoticonReject(message, skipLabel))
-            const ok = await abortableSleep(resolveSendDelayMs(interval, enableRandomInterval), signal)
-            if (!ok) {
-              completed = false
-              break outer
-            }
-            continue
-          }
-
-          // Cross-room emote ID: B站 echoes it back as raw text in chat, so block it; still sleep to keep cadence.
-          if (isUnavailableEmoticon(message)) {
-            const skipLabel = total > 1 ? `自动表情 [${i + 1}/${total}]` : '自动表情'
-            appendLog(formatUnavailableEmoticonReject(message, skipLabel))
-            const ok = await abortableSleep(resolveSendDelayMs(interval, enableRandomInterval), signal)
-            if (!ok) {
-              completed = false
-              break outer
-            }
-            continue
-          }
-
           const isEmote = isEmoticonUnique(message)
-          const originalMessage = message
+          if (isLockedEmoticon(message)) throw new Error(formatLockedEmoticonReject(message, '自动表情'))
+          if (isUnavailableEmoticon(message)) throw new Error(formatUnavailableEmoticonReject(message, '自动表情'))
           const processedMessage = isEmote ? message : applyReplacements(message)
-          const wasReplaced = !isEmote && originalMessage !== processedMessage
-
-          if (enableRandomColor) {
-            await setRandomDanmakuColor(roomId, csrfToken ?? '')
+          if (!canContinue()) {
+            completed = false
+            break outer
+          }
+          if (enableRandomColor) await setRandomDanmakuColor(roomId, csrfToken)
+          if (!canContinue()) {
+            completed = false
+            break outer
           }
 
-          const result = await enqueueDanmaku(processedMessage, roomId, csrfToken ?? '', SendPriority.AUTO, 'loop')
-          const displayMsg = wasReplaced ? `${originalMessage} → ${processedMessage}` : processedMessage
+          const { observer, guard } = runObserver(run.runId, isCurrent)
+          const result: SendDanmakuResult = await enqueueDanmaku(
+            processedMessage,
+            roomId,
+            csrfToken,
+            SendPriority.AUTO,
+            'loop',
+            guard,
+            observer
+          )
+          const displayMsg = message === processedMessage ? message : `${message} → ${processedMessage}`
           const baseLabel = result.isEmoticon ? '自动表情' : '自动'
-          const label = total > 1 ? `${baseLabel} [${i + 1}/${total}]` : baseLabel
+          const label = tasks.length > 1 ? `${baseLabel} [${i + 1}/${tasks.length}]` : baseLabel
           appendLog(result, label, displayMsg)
-
-          const ok = await abortableSleep(resolveSendDelayMs(interval, enableRandomInterval), signal)
-          if (!ok) {
+          if (!isCurrent()) {
+            completed = false
+            break outer
+          }
+          if (!result.success) {
+            const current = autoSendRun.peek()
+            stopRun(
+              run.runId,
+              result.cancelled ? 'cancelled' : current.preparationFailed > 0 ? 'preparation-error' : 'failure'
+            )
+            completed = false
+            break outer
+          }
+          if (!hasBudget(run.runId)) {
+            if (i === tasks.length - 1 && j === sendItems.length - 1) appendLog(`🔵第 ${++count} 轮发送完成`)
+            stopRun(run.runId, 'limit')
+            completed = false
+            break outer
+          }
+          if (!(await abortableSleep(resolveSendDelayMs(interval, enableRandomInterval), signal))) {
             completed = false
             break outer
           }
         }
       }
-
-      currentAbort = null
-
-      if (completed) {
-        count += 1
-        appendLog(`🔵第 ${count} 轮发送完成`)
+      if (completed && isCurrent()) appendLog(`🔵第 ${++count} 轮发送完成`)
+    } catch (err) {
+      if (isCurrent()) {
+        appendLog(`🔴 自动发送准备失败：${err instanceof Error ? err.message : String(err)}`)
+        if (autoSendRun.peek().preparationFailed === preparationFailuresBefore) recordPreparationFailure(run.runId)
+        else stopRun(run.runId, 'preparation-error')
       }
-    } else {
-      count = 0
-      await new Promise(r => setTimeout(r, 1000))
+    } finally {
+      if (currentAbort === controller) currentAbort = null
     }
   }
 }

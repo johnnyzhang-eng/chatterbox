@@ -98,6 +98,7 @@ function MemeItem({
         const display = wasReplaced && total === 1 ? `${meme.content} → ${segment}` : segment
 
         appendLog(result, label, display)
+        if (!result.success) return
 
         if (i < total - 1) {
           await new Promise(r => setTimeout(r, msgSendInterval.value * 1000))

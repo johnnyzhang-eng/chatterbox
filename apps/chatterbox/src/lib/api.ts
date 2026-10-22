@@ -3,6 +3,7 @@ import type { BilibiliGetEmoticonsResponse } from '../types'
 import { BASE_URL } from './const'
 import { isEmoticonUnique } from './emoticon'
 import { buildReplacementMap } from './replacement'
+import { createSendTracker, type SendObserver } from './send-stats'
 import { availableDanmakuColors, cachedEmoticonPackages, cachedRoomId, cachedStreamerUid } from './store'
 import { extractRoomNumber, readPath } from './utils'
 import { cachedWbiKeys, encodeWbi } from './wbi'
@@ -102,43 +103,62 @@ export async function fetchEmoticons(roomId: number): Promise<void> {
   }
 }
 
+export interface SendDanmakuReceipt {
+  http_status: number | null
+  code: unknown
+  message: unknown
+  msg: unknown
+  id_str: unknown
+}
+
 export interface SendDanmakuResult {
+  /** API acceptance, not confirmed public display. */
   success: boolean
   message: string
   isEmoticon: boolean
   error?: string
+  receipt?: SendDanmakuReceipt
+  /** An API receipt alone cannot confirm public display. */
+  deliveryConfirmed?: false
   /** Set when preempted by a higher-priority send; treat as benign skip, not failure. */
   cancelled?: boolean
 }
 
 /** Sends a single danmaku message to the Bilibili live room. */
-export async function sendDanmaku(message: string, roomId: number, csrfToken: string): Promise<SendDanmakuResult> {
-  const emoticon = isEmoticonUnique(message)
-
-  const form = new FormData()
-  form.append('bubble', '2')
-  form.append('msg', message)
-  form.append('color', '16777215')
-  form.append('mode', '1')
-  form.append('room_type', '0')
-  form.append('jumpfrom', '0')
-  form.append('reply_mid', '0')
-  form.append('reply_attr', '0')
-  form.append('replay_dmid', '')
-  form.append('statistics', '{"appId":100,"platform":5}')
-  form.append('fontsize', '25')
-  form.append('rnd', String(Math.floor(Date.now() / 1000)))
-  form.append('roomid', String(roomId))
-  form.append('csrf', csrfToken)
-  form.append('csrf_token', csrfToken)
-
-  if (emoticon) {
-    form.append('dm_type', '1')
-    // Bilibili's API requires this empty object.
-    form.append('emoticon_options', '{}')
-  }
-
+export async function sendDanmaku(
+  message: string,
+  roomId: number,
+  csrfToken: string,
+  observer?: SendObserver
+): Promise<SendDanmakuResult> {
+  const tracker = createSendTracker(observer)
+  let emoticon = false
+  const receipt: SendDanmakuReceipt = { http_status: null, code: null, message: null, msg: null, id_str: null }
   try {
+    emoticon = isEmoticonUnique(message)
+    const form = new FormData()
+    form.append('bubble', '2')
+    form.append('msg', message)
+    form.append('color', '16777215')
+    form.append('mode', '1')
+    form.append('room_type', '0')
+    form.append('jumpfrom', '0')
+    form.append('reply_mid', '0')
+    form.append('reply_attr', '0')
+    form.append('replay_dmid', '')
+    form.append('statistics', '{"appId":100,"platform":5}')
+    form.append('fontsize', '25')
+    form.append('rnd', String(Math.floor(Date.now() / 1000)))
+    form.append('roomid', String(roomId))
+    form.append('csrf', csrfToken)
+    form.append('csrf_token', csrfToken)
+
+    if (emoticon) {
+      form.append('dm_type', '1')
+      // Bilibili's API requires this empty object.
+      form.append('emoticon_options', '{}')
+    }
+
     let query = ''
     if (cachedWbiKeys) {
       query = encodeWbi(
@@ -150,35 +170,55 @@ export async function sendDanmaku(message: string, roomId: number, csrfToken: st
     }
 
     const url = `${BASE_URL.BILIBILI_MSG_SEND}?${query}`
+    tracker.start()
     const resp = await fetch(url, {
       method: 'POST',
       credentials: 'include',
       body: form,
     })
 
-    const json: { message?: string } = await resp.json()
-
-    if (json.message) {
-      return {
-        success: false,
-        message,
-        isEmoticon: emoticon,
-        error: json.message,
-      }
+    receipt.http_status = resp.status
+    const json: unknown = await resp.json()
+    receipt.code = readPath(json, 'code') ?? null
+    receipt.message = readPath(json, 'message') ?? null
+    receipt.msg = readPath(json, 'msg') ?? null
+    try {
+      const extra = readPath(json, 'data', 'mode_info', 'extra')
+      const parsed: unknown = typeof extra === 'string' ? JSON.parse(extra) : extra
+      receipt.id_str = readPath(parsed, 'id_str') ?? readPath(json, 'data', 'id_str') ?? null
+    } catch {
+      // A malformed optional display ID does not invalidate the receipt.
     }
+    const rejectionTexts = [
+      ...new Set(
+        [receipt.message, receipt.msg]
+          .filter(value => value != null)
+          .map(String)
+          .filter(value => value.trim() && !/^(ok|success)$/i.test(value.trim()))
+      ),
+    ]
+    const success = resp.ok && receipt.code === 0 && rejectionTexts.length === 0
 
-    return {
-      success: true,
+    return tracker.settle({
+      success,
       message,
       isEmoticon: emoticon,
-    }
+      deliveryConfirmed: false,
+      receipt,
+      error: success
+        ? undefined
+        : rejectionTexts.join(' / ') ||
+          (!resp.ok ? `HTTP ${resp.status}` : `接口未接受：code=${JSON.stringify(receipt.code)}`),
+    })
   } catch (err) {
-    return {
+    return tracker.settle({
       success: false,
       message,
       isEmoticon: emoticon,
+      deliveryConfirmed: false,
+      receipt,
       error: err instanceof Error ? err.message : String(err),
-    }
+    })
   }
 }
 

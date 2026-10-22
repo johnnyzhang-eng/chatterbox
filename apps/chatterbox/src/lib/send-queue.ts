@@ -1,18 +1,16 @@
-/**
- * Global send queue serializing all outbound danmaku against Bilibili's
- * per-account rate limit: one POST in flight; manual actions cancel pending
- * AUTO items but only reorder STT; the in-flight send is never cancelled.
- */
+/** Global send queue: one POST in flight; cancellation affects only unsent work. */
 
 import type { ActionSource } from '@laplace.live/kakashi-protocol'
 
 import { type SendDanmakuResult, sendDanmaku } from './api'
+import { automaticSendGuard, onAutomaticSendStop, stopAutomaticSends } from './send-control'
+import { createSendTracker, type SendObserver } from './send-stats'
 
 /** Higher number = higher priority. Manual user actions jump ahead of automation. */
 export const SendPriority = {
   AUTO: 0,
   STT: 1,
-  /** Copy Ninja mirror copies; like STT, reorders ahead of AUTO but is never cancelled. */
+  /** Copy Ninja shares STT's priority, but remains an automatic source. */
   COPY: 1,
   MANUAL: 2,
 } as const
@@ -36,6 +34,7 @@ interface QueueItem {
   priority: SendPriority
   source: SendSource
   guard?: () => boolean
+  tracker: ReturnType<typeof createSendTracker>
   resolve: (result: SendDanmakuResult) => void
   reject: (err: unknown) => void
   cancelled: boolean
@@ -47,7 +46,39 @@ const HARD_MIN_GAP_MS = 1010
 const queue: QueueItem[] = []
 let processing = false
 let lastSendCompletedAt = 0
+let waitingItem: QueueItem | null = null
 const sentListeners = new Set<(sent: SentDanmaku) => void>()
+
+function cancelItem(item: QueueItem, error = 'cancelled'): void {
+  if (item.cancelled) return
+  item.cancelled = true
+  item.resolve(
+    item.tracker.settle({ success: false, cancelled: true, message: item.message, isEmoticon: false, error })
+  )
+}
+
+/** Cancel unsent items, including one waiting for the dispatch gap; an in-flight POST is unaffected. */
+export function cancelQueuedDanmaku(source?: SendSource): void {
+  for (const item of queue) {
+    if (source === undefined || item.source === source) cancelItem(item)
+  }
+  if (waitingItem && (source === undefined || waitingItem.source === source)) cancelItem(waitingItem)
+}
+
+onAutomaticSendStop(() => cancelQueuedDanmaku())
+
+function isAutomatic(item: QueueItem): boolean {
+  return item.priority === SendPriority.AUTO || item.source === 'copy'
+}
+
+function isCurrent(item: QueueItem): boolean {
+  if (item.cancelled) return false
+  try {
+    return item.guard?.() ?? true
+  } catch {
+    return false
+  }
+}
 
 /** Subscribe to accepted sends (Copy Ninja broadcasts from here); returns the unsubscribe. */
 export function onDanmakuSent(listener: (sent: SentDanmaku) => void): () => void {
@@ -81,6 +112,7 @@ async function processQueue(): Promise<void> {
       while (queue.length > 0 && queue[0].cancelled) queue.shift()
       const item = queue.shift()
       if (!item) break
+      waitingItem = item
 
       if (lastSendCompletedAt > 0) {
         const sinceLast = Date.now() - lastSendCompletedAt
@@ -88,32 +120,32 @@ async function processQueue(): Promise<void> {
           await new Promise(r => setTimeout(r, HARD_MIN_GAP_MS - sinceLast))
         }
       }
+      waitingItem = null
+      if (item.cancelled) continue
       if (item.guard) {
         let allowed: boolean
         try {
           allowed = item.guard()
         } catch (err) {
+          item.tracker.settle({ success: false, message: item.message, isEmoticon: false, error: String(err) })
           item.reject(err)
           continue
         }
         if (!allowed) {
-          item.resolve({
-            success: false,
-            cancelled: true,
-            message: item.message,
-            isEmoticon: false,
-            error: 'cancelled',
-          })
+          cancelItem(item)
           continue
         }
       }
       try {
-        const result = await sendDanmaku(item.message, item.roomId, item.csrfToken)
+        const result = item.tracker.settle(await sendDanmaku(item.message, item.roomId, item.csrfToken, item.tracker))
         lastSendCompletedAt = Date.now()
-        if (result.success) notifySent(item)
+        if (!result.success && !result.cancelled && isAutomatic(item) && isCurrent(item)) stopAutomaticSends()
+        if (result.success && (!isAutomatic(item) || isCurrent(item))) notifySent(item)
         item.resolve(result)
       } catch (err) {
+        item.tracker.settle({ success: false, message: item.message, isEmoticon: false, error: String(err) })
         lastSendCompletedAt = Date.now()
+        if (isAutomatic(item) && isCurrent(item)) stopAutomaticSends()
         item.reject(err)
       }
     }
@@ -133,23 +165,30 @@ export function enqueueDanmaku(
   csrfToken: string,
   priority: SendPriority,
   source: SendSource,
-  guard?: () => boolean
+  guard?: () => boolean,
+  observer?: SendObserver
 ): Promise<SendDanmakuResult> {
+  if (priority === SendPriority.AUTO || source === 'copy') guard = automaticSendGuard(guard)
   return new Promise((resolve, reject) => {
-    const item: QueueItem = { message, roomId, csrfToken, priority, source, guard, resolve, reject, cancelled: false }
+    const item: QueueItem = {
+      message,
+      roomId,
+      csrfToken,
+      priority,
+      source,
+      guard,
+      tracker: createSendTracker(observer),
+      resolve,
+      reject,
+      cancelled: false,
+    }
     insertByPriority(item)
 
     if (priority === SendPriority.MANUAL) {
+      if (waitingItem?.priority === SendPriority.AUTO) cancelItem(waitingItem, 'preempted')
       for (const q of queue) {
         if (q !== item && !q.cancelled && q.priority === SendPriority.AUTO) {
-          q.cancelled = true
-          q.resolve({
-            success: false,
-            cancelled: true,
-            message: q.message,
-            isEmoticon: false,
-            error: 'preempted',
-          })
+          cancelItem(q, 'preempted')
         }
       }
     }

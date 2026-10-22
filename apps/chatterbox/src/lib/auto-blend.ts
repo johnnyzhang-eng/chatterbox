@@ -16,7 +16,8 @@ import { isLlmReady, polishWithLlm } from './llm-tasks'
 import { appendLog } from './log'
 import { compileMessageBlacklist, testMessageBlacklist } from './message-blacklist'
 import { applyReplacements } from './replacement'
-import { enqueueDanmaku, SendPriority } from './send-queue'
+import { automaticSendGuard, onAutomaticSendStop } from './send-control'
+import { cancelQueuedDanmaku, enqueueDanmaku, SendPriority } from './send-queue'
 import {
   autoBlendAvoidRepeat,
   autoBlendAvoidRepeatCount,
@@ -291,7 +292,9 @@ async function triggerSend(originalText: string, uniqueUsers: number, totalCount
 
   const controller = new AbortController()
   sendController = controller
-  const isCurrent = () => sendController === controller && autoBlendEnabled.value
+  const isCurrent = automaticSendGuard(
+    () => sendController === controller && !controller.signal.aborted && autoBlendEnabled.value
+  )
   const decisionRequired = autoBlendDecisionEnabled.value
   const now = Date.now()
   const contextCutoff = now - autoBlendWindowSec.value * 1000
@@ -389,7 +392,7 @@ async function triggerSend(originalText: string, uniqueUsers: number, totalCount
     }
 
     if (!isCurrent()) return
-    const result = await enqueueDanmaku(toSend, roomId, csrfToken, SendPriority.AUTO, 'blend')
+    const result = await enqueueDanmaku(toSend, roomId, csrfToken, SendPriority.AUTO, 'blend', isCurrent)
     const label = result.isEmoticon ? '自动融入(表情)' : '自动融入'
     const display = wasReplaced || toSend !== originalText ? `${originalText} → ${toSend}` : toSend
     appendLog(result, label, display)
@@ -422,6 +425,7 @@ export function startAutoBlend(): void {
 export function stopAutoBlend(): void {
   sendController?.abort()
   sendController = null
+  cancelQueuedDanmaku('blend')
   decisionPending.value = false
   if (snapshotTimer) {
     clearInterval(snapshotTimer)
@@ -438,3 +442,8 @@ export function stopAutoBlend(): void {
   recentDecisionMessages.length = 0
   autoBlendStatus.value = { candidates: [], cooldownRemainingSec: 0, chatsPerMinute: 0, cooldownEffectiveSec: 0 }
 }
+
+onAutomaticSendStop(() => {
+  autoBlendEnabled.value = false
+  stopAutoBlend()
+})

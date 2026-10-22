@@ -4,6 +4,7 @@ import * as signals from '@preact/signals'
 import type { DanmakuEvent } from './danmaku-stream'
 
 import * as blacklist from './message-blacklist'
+import * as sendControl from './send-control'
 import * as utils from './utils'
 
 interface Decision {
@@ -52,6 +53,7 @@ async function createHarness() {
   })
   const polish = mock(async (_slot: string, text: string, _options?: { signal?: AbortSignal }) => `${text}！`)
   const enqueue = mock(async (_text: string, _room: string, _csrf: string, _priority: number, _source: string) => ({
+    success: true,
     isEmoticon: false,
     code: 0,
   }))
@@ -92,7 +94,15 @@ async function createHarness() {
     './log': { appendLog: log },
     './message-blacklist': blacklist,
     './replacement': { applyReplacements: (text: string) => text },
-    './send-queue': { enqueueDanmaku: enqueue, SendPriority: { AUTO: 1 } },
+    './send-control': {
+      automaticSendGuard: sendControl.automaticSendGuard,
+      onAutomaticSendStop: (listener: () => void) => {
+        const unsubscribe = sendControl.onAutomaticSendStop(listener)
+        cleanups.push(unsubscribe)
+        return unsubscribe
+      },
+    },
+    './send-queue': { cancelQueuedDanmaku: mock(() => {}), enqueueDanmaku: enqueue, SendPriority: { AUTO: 1 } },
     './store': settings,
     './utils': utils,
     clock: {
@@ -405,5 +415,25 @@ describe('automatic blend decision gate', () => {
     expect(h.enqueue).toHaveBeenCalledTimes(1)
     expect(h.enqueue.mock.calls[0]?.[0]).toBe('新趋势')
     expect(h.engine.decisionPending.value).toBe(false)
+  })
+
+  test('a stop from another automatic source invalidates a pending polish across restart', async () => {
+    const h = await createHarness()
+    const oldPolish = Promise.withResolvers<string>()
+    h.settings.autoBlendYolo.value = true
+    h.polish.mockImplementationOnce(() => oldPolish.promise)
+    h.qualify('旧趋势')
+    await flush()
+    sendControl.stopAutomaticSends()
+    expect(h.settings.autoBlendEnabled.value).toBe(false)
+    h.settings.autoBlendEnabled.value = true
+    h.engine.startAutoBlend()
+    oldPolish.resolve('旧结果')
+    await flush()
+    expect(h.enqueue).not.toHaveBeenCalled()
+    h.qualify('新趋势')
+    await flush()
+    expect(h.enqueue).toHaveBeenCalledTimes(1)
+    expect(h.enqueue.mock.calls[0]?.[0]).toBe('新趋势！')
   })
 })

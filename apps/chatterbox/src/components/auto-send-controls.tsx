@@ -1,8 +1,10 @@
+import { isEmoticonUnique } from '../lib/emoticon'
 import { describeLlmGap, isLlmApiConfigured } from '../lib/llm-tasks'
 import { appendLog } from '../lib/log'
-import { cancelLoop } from '../lib/loop'
+import { type AutoSendStopReason, autoSendRun, cancelLoop } from '../lib/loop'
 import {
   activeTemplateIndex,
+  autoSendMaxMessages,
   autoSendPanelOpen,
   autoSendYolo,
   cachedRoomId,
@@ -33,11 +35,25 @@ function getPreview(template: string): string {
   return getGraphemes(firstLine).length > 10 ? `${trimText(firstLine, 40)[0]}…` : firstLine
 }
 
+const STOP_LABELS: Record<Exclude<AutoSendStopReason, null>, string> = {
+  manual: '手动停止',
+  limit: '达到本次请求上限',
+  failure: '发送失败，已停止',
+  cancelled: '未发请求已取消',
+  'preparation-error': '发送前错误，已停止',
+}
+
 export function AutoSendControls() {
   const templates = msgTemplates.value
   const idx = activeTemplateIndex.value
   const currentTemplate = templates[idx] ?? ''
-  const msgCount = processMessages(currentTemplate, maxLength.value).length
+  const run = autoSendRun.value
+  const segments = currentTemplate
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .flatMap(line => (isEmoticonUnique(line) ? [line] : processMessages(line, maxLength.value)))
+  const msgCount = segments.length
 
   const toggleSend = () => {
     if (!sendMsg.value) {
@@ -112,6 +128,32 @@ export function AutoSendControls() {
           </Button>
         </div>
 
+        <Label className='my-2 flex flex-wrap items-center gap-2'>
+          本次请求上限（0不限）
+          <Input
+            type='number'
+            min='0'
+            step='1'
+            autocomplete='off'
+            className='w-20'
+            value={autoSendMaxMessages.value}
+            disabled={run.active}
+            onInput={e => {
+              autoSendMaxMessages.value = Number(e.currentTarget.value)
+            }}
+          />
+        </Label>
+        <div class='my-2 text-sm'>
+          <div>
+            本次请求 {run.requests}/{run.limit || '不限'} ·{' '}
+            {run.active ? '运行中' : run.stopReason ? STOP_LABELS[run.stopReason] : '未启动'}
+          </div>
+          <div>
+            接口接受 {run.accepted} · 失败 {run.failed} · 未发取消 {run.cancelled} · 发送前错误 {run.preparationFailed}
+          </div>
+          <div class='text-ga6 text-xs'>每次开车重新计数；接口接受仍需独立核验公开显示。</div>
+        </div>
+
         {/* Own line: LLM-side controls, orthogonal to the template controls above. */}
         <div class='my-2 flex items-center gap-1'>
           <Button
@@ -146,6 +188,32 @@ export function AutoSendControls() {
           placeholder='在这输入弹幕，每行一句话，超过可发送字数的会自动进行分割'
           className='h-20'
         />
+
+        <details class='my-2 rounded border border-ga2 border-solid p-2'>
+          <summary class='cursor-pointer select-none'>当前草稿分段预览（{msgCount} 条）</summary>
+          <p class='my-1 text-ga6 text-xs'>
+            文字按换行及当前 {maxLength.value}{' '}
+            字上限分段，字数按可见字符计；表情标记保持单条。可在下方调整上限，实际发送仍受平台限制。
+          </p>
+          {segments.length > 0 ? (
+            <ol class='my-2 max-h-48 list-none space-y-2 overflow-y-auto p-0'>
+              {segments.map((segment, i) => (
+                <li key={`${i}:${segment}`}>
+                  <div class='text-ga6 text-xs'>
+                    第 {i + 1} 条 · {getGraphemes(segment).length} 字
+                  </div>
+                  <div class='whitespace-pre-wrap break-words'>{segment}</div>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p class='my-2 text-ga6'>暂无可发送内容，请先输入模板。</p>
+          )}
+          <p class='my-1 text-ga6 text-xs'>
+            模板修改下一轮生效，已快照的当前轮次继续使用原内容。此处即刻预览当前草稿；替换规则、YOLO
+            润色或随机字符可能改变最终内容和条数。预览或运行中均不代表公开送达。
+          </p>
+        </details>
 
         <div class='my-2 flex flex-wrap gap-2'>
           <div class='flex flex-wrap items-center gap-x-2 gap-y-1'>

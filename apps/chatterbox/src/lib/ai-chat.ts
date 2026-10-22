@@ -14,11 +14,13 @@ import { type ChatCompletionResponseFormat, chatCompletion } from './llm'
 import { isLlmReady } from './llm-tasks'
 import { appendLog } from './log'
 import { getActiveLlmPrompt } from './prompts'
-import { enqueueDanmaku, SendPriority } from './send-queue'
+import { automaticSendGuard, onAutomaticSendStop } from './send-control'
+import { cancelQueuedDanmaku, enqueueDanmaku, SendPriority } from './send-queue'
 import {
   activeLlmProvider,
   aiChatAutoSend,
   aiChatContextMaxChars,
+  aiChatEnabled,
   aiChatMaxMessageLength,
   aiChatTemperature,
   aiChatViewerInterval,
@@ -103,6 +105,13 @@ let scheduledTimer: ReturnType<typeof setTimeout> | null = null
 let scheduledReason: 'transcript' | 'viewer' | null = null
 let inflight = false
 let startCount = 0
+let sendSession = 0
+let generationController: AbortController | null = null
+
+function currentSendGuard(): () => boolean {
+  const session = sendSession
+  return automaticSendGuard(() => session === sendSession && startCount > 0 && aiChatEnabled.value)
+}
 
 /** Buffer looks ready (endpoint detected / sentence-final / long). */
 const DEBOUNCE_READY_MS = 500
@@ -236,7 +245,12 @@ function isResponseFormatRejection(err: unknown): boolean {
   return err instanceof Error && /HTTP 4\d\d/.test(err.message) && err.message.toLowerCase().includes('response_format')
 }
 
-async function callAiChatLlm(sourceText: string, hasTranscript: boolean): Promise<AiChatDecision | null> {
+async function callAiChatLlm(
+  sourceText: string,
+  hasTranscript: boolean,
+  isCurrent: () => boolean
+): Promise<AiChatDecision | null> {
+  if (!isCurrent()) return null
   const systemPrompt = getActiveLlmPrompt('aiChat')
   if (!systemPrompt.trim()) {
     appendLog('⚠️ [AI 融入] 未配置 AI 融入提示词')
@@ -274,9 +288,11 @@ async function callAiChatLlm(sourceText: string, hasTranscript: boolean): Promis
   let rfMode = responseFormatModes.get(modeKey) ?? 'json_schema'
   // Bound the request so a stalled fetch can't wedge the engine (see LLM_CALL_TIMEOUT_MS).
   const controller = new AbortController()
+  generationController = controller
   const timeoutId = setTimeout(() => controller.abort(), LLM_CALL_TIMEOUT_MS)
   try {
     while (true) {
+      if (!isCurrent() || controller.signal.aborted) return null
       try {
         const content = await chatCompletion({
           base,
@@ -290,8 +306,11 @@ async function callAiChatLlm(sourceText: string, hasTranscript: boolean): Promis
           responseFormat: buildResponseFormat(rfMode, maxLen),
           signal: controller.signal,
         })
+        if (!isCurrent() || controller.signal.aborted) return null
         return parseDecision(content, maxLen)
       } catch (err) {
+        if (!isCurrent()) return null
+        if (controller.signal.aborted) throw err
         const next: ResponseFormatMode | null =
           rfMode === 'json_schema' ? 'json_object' : rfMode === 'json_object' ? 'none' : null
         if (next === null || !isResponseFormatRejection(err)) throw err
@@ -301,6 +320,7 @@ async function callAiChatLlm(sourceText: string, hasTranscript: boolean): Promis
       }
     }
   } catch (err) {
+    if (!isCurrent()) return null
     if (err instanceof DOMException && err.name === 'AbortError') {
       appendLog(`⏱️ [AI 融入] LLM 调用超时（${Math.round(LLM_CALL_TIMEOUT_MS / 1000)} 秒），已跳过本次生成`)
       return null
@@ -310,12 +330,15 @@ async function callAiChatLlm(sourceText: string, hasTranscript: boolean): Promis
     return null
   } finally {
     clearTimeout(timeoutId)
+    if (generationController === controller) generationController = null
   }
 }
 
-async function sendAiChatDanmaku(message: string): Promise<boolean> {
+async function sendAiChatDanmaku(message: string, isCurrent = currentSendGuard()): Promise<boolean> {
   try {
+    if (!isCurrent()) return false
     const roomId = await ensureRoomId()
+    if (!isCurrent()) return false
     const csrfToken = getCsrfToken()
     if (!csrfToken) {
       appendLog('❌ [AI 融入] 未找到登录信息，请先登录 Bilibili')
@@ -323,7 +346,7 @@ async function sendAiChatDanmaku(message: string): Promise<boolean> {
     }
     // Record BEFORE the send so the echo can find the entry when it broadcasts back.
     markOutgoing(message)
-    const result = await enqueueDanmaku(message, roomId, csrfToken, SendPriority.AUTO, 'ai')
+    const result = await enqueueDanmaku(message, roomId, csrfToken, SendPriority.AUTO, 'ai', isCurrent)
     appendLog(result, 'AI 融入', message)
     return result.success
   } catch (err) {
@@ -366,6 +389,9 @@ function addPendingCandidate(transcript: string, decision: AiChatDecision): void
 
 async function runGeneration(reason: 'transcript' | 'viewer' | 'manual'): Promise<void> {
   if (inflight) return
+  const session = sendSession
+  const isCurrent = currentSendGuard()
+  if (!isCurrent()) return
   // Snapshot + clear atomically; content landing during the await starts the next round.
   const transcript = sttTranscriptBuffer.value
   sttTranscriptBuffer.value = ''
@@ -382,8 +408,8 @@ async function runGeneration(reason: 'transcript' | 'viewer' | 'manual'): Promis
   try {
     const trimmedTranscript = transcript.trim()
     const sourceText = trimmedTranscript || '（暂无主播语音；请仅基于上下文中的观众弹幕做出反应）'
-    const decision = await callAiChatLlm(sourceText, trimmedTranscript.length > 0)
-    if (!decision) {
+    const decision = await callAiChatLlm(sourceText, trimmedTranscript.length > 0, isCurrent)
+    if (!decision || !isCurrent()) {
       // callAiChatLlm already logged the failure
       return
     }
@@ -391,8 +417,9 @@ async function runGeneration(reason: 'transcript' | 'viewer' | 'manual'): Promis
 
     if (decision.send && decision.message.trim()) {
       if (aiChatAutoSend.value) {
-        const ok = await sendAiChatDanmaku(decision.message)
-        recordConvHistory(transcript, decision.message)
+        const ok = await sendAiChatDanmaku(decision.message, isCurrent)
+        if (session !== sendSession) return
+        if (ok) recordConvHistory(transcript, decision.message)
         appendHistory({
           id: nextEntryId++,
           transcript,
@@ -421,11 +448,11 @@ async function runGeneration(reason: 'transcript' | 'viewer' | 'manual'): Promis
       })
     }
   } finally {
-    inflight = false
-    // Don't resurrect the pill out of 'disabled' if torn down mid-flight.
-    // peek() avoids the narrowing the 'generating' assignment above would impose.
-    if (aiChatStatus.peek() !== 'disabled') {
-      aiChatStatus.value = scheduledTimer ? 'waiting' : 'idle'
+    if (session === sendSession) {
+      inflight = false
+      if (aiChatStatus.peek() !== 'disabled') {
+        aiChatStatus.value = scheduledTimer ? 'waiting' : 'idle'
+      }
     }
   }
 }
@@ -441,7 +468,7 @@ function clearScheduled(): void {
 function scheduleGeneration(delay: number, reason: 'transcript' | 'viewer'): void {
   // Gate here so a later LLM configure flips it via the parent effect's tracking,
   // without an engine restart.
-  if (!isLlmReady('aiChat')) return
+  if (!aiChatEnabled.value || startCount === 0 || !isLlmReady('aiChat')) return
   clearScheduled()
   scheduledReason = reason
   aiChatStatus.value = 'waiting'
@@ -468,8 +495,11 @@ export function acceptCandidate(id: number, editedMessage?: string): void {
     return
   }
   pendingCandidates.value = pendingCandidates.value.filter(c => c.id !== id)
+  const session = sendSession
+  const isCurrent = currentSendGuard()
   void (async () => {
-    const ok = await sendAiChatDanmaku(message)
+    const ok = await sendAiChatDanmaku(message, isCurrent)
+    if (session !== sendSession) return
     appendHistory({
       id: nextEntryId++,
       transcript: cand.transcript,
@@ -510,6 +540,7 @@ export function clearAiChatHistory(): void {
 export function startAiChatEngine(): void {
   startCount++
   if (startCount > 1) return
+  sendSession++
 
   // Deliberately keep `aiChatHistory` across off/on toggles; clear pending
   // candidates since their transcripts may no longer be relevant.
@@ -575,6 +606,7 @@ export function stopAiChatEngine(): void {
   if (startCount === 0) return
   startCount--
   if (startCount > 0) return
+  invalidateAiSends()
   if (unsubscribeDanmaku) {
     unsubscribeDanmaku()
     unsubscribeDanmaku = null
@@ -583,6 +615,19 @@ export function stopAiChatEngine(): void {
     stopBufferEffect()
     stopBufferEffect = null
   }
+}
+
+function invalidateAiSends(): void {
+  sendSession++
+  generationController?.abort()
+  generationController = null
+  inflight = false
   clearScheduled()
+  cancelQueuedDanmaku('ai')
   aiChatStatus.value = 'disabled'
 }
+
+onAutomaticSendStop(() => {
+  aiChatEnabled.value = false
+  invalidateAiSends()
+})

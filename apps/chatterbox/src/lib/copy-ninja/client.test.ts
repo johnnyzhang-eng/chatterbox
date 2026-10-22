@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from 'bun:test'
+import { afterEach, expect, type Mock, spyOn, test } from 'bun:test'
 import { join } from 'node:path'
 import type { BunPlugin } from 'bun'
 
@@ -21,7 +21,11 @@ interface Harness {
   stopCopyNinja(): void
   settings: typeof import('./settings')
   store: { cachedRoomId: { value: number | null } }
-  sendQueue: { sent: (SentItem & { priority: number })[]; emitSent(item: SentItem): void }
+  sendQueue: {
+    sent: (SentItem & { priority: number })[]
+    emitSent(item: SentItem): void
+    cancelQueuedDanmaku: Mock<typeof import('../send-queue').cancelQueuedDanmaku>
+  }
   emoteCache: { loaded: boolean }
   llm: {
     gap: string | null
@@ -68,8 +72,15 @@ async function loadClient(uid: string, gm: Record<string, unknown>): Promise<Har
       }
     `,
     [join(LIB, 'send-queue.ts')]: `
+      import { mock } from 'bun:test'
       export const SendPriority = { AUTO: 0, STT: 1, COPY: 1, MANUAL: 2 }
       export const sent = []
+      const pending = new Set()
+      export const cancelQueuedDanmaku = mock(source => {
+        for (const item of pending) {
+          if (source === undefined || item.source === source) item.cancelled = true
+        }
+      })
       const listeners = new Set()
       export function onDanmakuSent(listener) {
         listeners.add(listener)
@@ -79,8 +90,11 @@ async function loadClient(uid: string, gm: Record<string, unknown>): Promise<Har
         for (const listener of listeners) listener(item)
       }
       export async function enqueueDanmaku(message, roomId, csrfToken, priority, source, guard) {
+        const item = { source, cancelled: false }
+        pending.add(item)
         await Promise.resolve()
-        if (guard && !guard()) return { success: false, cancelled: true, message, isEmoticon: false, error: 'cancelled' }
+        pending.delete(item)
+        if (item.cancelled || (guard && !guard())) return { success: false, cancelled: true, message, isEmoticon: false, error: 'cancelled' }
         sent.push({ message, roomId, priority, source })
         return { success: true, message, isEmoticon: false }
       }
@@ -262,7 +276,9 @@ test('stopping drops copies that are still waiting out their delay', async () =>
   master.sendQueue.emitSent({ message: '晚上好', roomId: ROOM, source: 'manual' })
   await until(() => broadcasts.mock.calls.length === 1, 'the broadcast')
   await Bun.sleep(100)
+  mirror.sendQueue.cancelQueuedDanmaku.mockClear()
   mirror.stopCopyNinja()
+  expect(mirror.sendQueue.cancelQueuedDanmaku.mock.calls).toEqual([['copy']])
   await Bun.sleep(1200)
   expect(mirror.sendQueue.sent).toHaveLength(0)
 })
@@ -384,14 +400,18 @@ test('a pause from another tab, or stopping, aborts rewrites still in flight', a
   mirror.llm.rewrite = hangUntilAborted
   master.sendQueue.emitSent({ message: '晚上好', roomId: ROOM, source: 'manual' })
   await until(() => mirror.llm.calls.length === 1, 'the first rewrite to start')
+  mirror.sendQueue.cancelQueuedDanmaku.mockClear()
   mirror.settings.copyNinjaPaused.value = true
   expect(mirror.llm.calls[0]?.signal?.aborted).toBe(true)
+  expect(mirror.sendQueue.cancelQueuedDanmaku.mock.calls).toEqual([['copy']])
 
   mirror.settings.copyNinjaPaused.value = false
   master.sendQueue.emitSent({ message: '晚上好', roomId: ROOM, source: 'manual' })
   await until(() => mirror.llm.calls.length === 2, 'the second rewrite to start')
+  mirror.sendQueue.cancelQueuedDanmaku.mockClear()
   mirror.stopCopyNinja()
   expect(mirror.llm.calls[1]?.signal?.aborted).toBe(true)
+  expect(mirror.sendQueue.cancelQueuedDanmaku.mock.calls).toEqual([['copy']])
   await Bun.sleep(50)
   expect(mirror.sendQueue.sent).toHaveLength(0)
 })

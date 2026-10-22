@@ -8,12 +8,32 @@ import {
   extractOpusAuthorUid,
   extractOpusPubDate,
   formatCodePoints,
+  formatDanmakuError,
   insertRandomChar,
   isHttpUrl,
   parseCustomChar,
   processMessages,
   resolveInvisibleChar,
 } from './utils'
+
+describe('formatDanmakuError', () => {
+  test('maps only the exact f and k codes and retains their originals', () => {
+    expect(formatDanmakuError('f')).toBe('f - 包含全局屏蔽词（原文：f）')
+    expect(formatDanmakuError('k')).toBe('k - 包含房间屏蔽词（原文：k）')
+  })
+
+  test.each(['Failed to fetch', 'max limit exceeded', 'network error', '系统升级中', ' f ', 'K'])(
+    'preserves the original text of %s',
+    error => {
+      expect(formatDanmakuError(error)).toBe(error)
+    }
+  )
+
+  test('handles missing errors', () => {
+    expect(formatDanmakuError(undefined)).toBe('未知错误')
+    expect(formatDanmakuError('')).toBe('未知错误')
+  })
+})
 
 /** Derives the BV id from bilibili video URLs; `undefined` for non-BV paths (legacy `av`, case-sensitive prefix). */
 describe('extractBvid', () => {
